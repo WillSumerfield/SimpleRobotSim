@@ -3,23 +3,37 @@ import gymnasium as gym
 from gymnasium import spaces
 import pygame
 import numpy as np
+import pymunk
 
 
 class MoveActions(Enum):
-    right = 0
-    up = 1
+    up = 0
+    down = 1
     left = 2
-    down = 3
+    right = 3
 
 class ClawActions(Enum):
     open = 0
     close = 1
 
 class GrasperEnv(gym.Env):
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
+
+    SPEED = 1
+    BALL_RADIUS = 24
+    GOAL_RADIUS = 8
+    FLOOR_Y = 32
+    CLAW_MIN_Y = 256
+    WALL_DISTANCE = 96
+    WALL_SIZE = (32, 128)
+    
+    TARGET_DISTANCE_REQUIREMENT = 5
+
+    WALL_COLOR = (64,64,64)
+
 
     def __init__(self, render_mode=None):
-        self.window_size = (768, 512)  # The size of the PyGame window
+        self.window_size = np.array([768, 512])  # The size of the PyGame window
         
         # What the agent sees
         self.observation_space = spaces.Dict(
@@ -66,15 +80,27 @@ class GrasperEnv(gym.Env):
         super().reset(seed=seed)
 
         # Choose the agent's location uniformly at random
-        self._agent_location = self.window_size[0] * self.np_random.random(2, dtype=float)
+        self._agent_location = (np.array([self.window_size[0], self.window_size[1]]) * self.np_random.random(2, dtype=float)) \
+                                + np.array([0, self.CLAW_MIN_Y])
 
-        # We will sample the target's location randomly until it does not
-        # coincide with the agent's location
-        self._target_location = self._agent_location
-        while np.array_equal(self._target_location, self._agent_location):
-            self._target_location = self.np_random.integers(
-                0, self.window_size[0], size=2, dtype=int
-            )
+        self._target_location = np.array([((self.window_size[0] - 2*self.BALL_RADIUS)* self.np_random.random(dtype=float)) + self.BALL_RADIUS, 
+                                          self.FLOOR_Y+self.BALL_RADIUS])
+
+        self._wall_locations = np.array([self._target_location[0] - self.WALL_DISTANCE, 
+                                         self._target_location[0] + self.WALL_DISTANCE])
+        
+        # Place the ball to either side of the target
+        left_offset = self._wall_locations[0] - self.WALL_SIZE[0]/2
+        right_offset = self._wall_locations[1] + self.WALL_SIZE[0]/2
+        left_space = left_offset - 2*self.BALL_RADIUS
+        right_space = self.window_size[0] - right_offset - 2*self.BALL_RADIUS
+        random_position = self.np_random.random(dtype=float) * (left_space + right_space)
+        ball_x = (random_position + self.BALL_RADIUS) if random_position <= left_space else (random_position + right_offset - left_space + self.BALL_RADIUS)
+        self._ball_location = np.array([ball_x, self.FLOOR_Y+self.BALL_RADIUS])
+        print(ball_x, random_position)
+        print(left_offset, right_offset)
+        print(left_space, right_space)
+        print(self._wall_locations, "\n")
 
         observation = self._get_obs()
         info = self._get_info()
@@ -85,16 +111,16 @@ class GrasperEnv(gym.Env):
         return observation, info
 
     def step(self, action):
-        # Map the action (element of {0,1,2,3}) to the direction we walk in
-        direction = self._action_to_direction[action[0]]
+   
+        velocity = self.SPEED * self._action_to_direction[action[0]]
 
-        # We use `np.clip` to make sure we don't leave the grid
-        self._agent_location = np.clip(
-            self._agent_location + direction, 0, self.window_size[0] - 1
-        )
+        # Stop the agent from leaving the room
+        self._agent_location = np.clip(self._agent_location + velocity, 0, self.window_size-1)
+
         # An episode is done iff the agent has reached the target
-        terminated = np.array_equal(self._agent_location, self._target_location)
-        reward = 1 if terminated else 0  # Binary sparse rewards
+        terminated = np.linalg.norm(self._ball_location - self._target_location) < 5
+
+        reward = 1 if terminated else 0
         observation = self._get_obs()
         info = self._get_info()
 
@@ -118,33 +144,48 @@ class GrasperEnv(gym.Env):
         canvas = pygame.Surface((self.window_size[0], self.window_size[1]))
         canvas.fill((255, 255, 255))
 
-        # First we draw the target
+        # Floor
+        pygame.draw.rect(canvas,
+                         self.WALL_COLOR,
+                         (0, 0, self.window_size[0], self.FLOOR_Y))
+
+        # Walls
+        pygame.draw.rect(canvas,
+                         self.WALL_COLOR,
+                         pygame.Rect(self._wall_locations[0]-self.WALL_SIZE[0]/2, 0, self.WALL_SIZE[0], self.WALL_SIZE[1]))
+        pygame.draw.rect(canvas,
+                         self.WALL_COLOR,
+                         pygame.Rect(self._wall_locations[1]-self.WALL_SIZE[0]/2, 0, self.WALL_SIZE[0], self.WALL_SIZE[1]))
+
+        # Ball
         pygame.draw.circle(canvas,
                            (255, 0, 0),
+                           self._ball_location,
+                           self.BALL_RADIUS)
+        
+        # Goal
+        pygame.draw.circle(canvas,
+                           (239, 191, 4),
                            self._target_location,
-                           10)
+                           self.GOAL_RADIUS)
 
-        # Now we draw the agent
+        # Claw
         pygame.draw.circle(
             canvas,
             (0, 0, 255),
             self._agent_location,
-            10,
+            self.BALL_RADIUS,
         )
 
+        inv_canvas = pygame.transform.flip(canvas, False, True) # Invert Y
         if self.render_mode == "human":
-            # The following line copies our drawings from `canvas` to the visible window
-            self.window.blit(canvas, canvas.get_rect())
+            self.window.blit(inv_canvas, inv_canvas.get_rect())
             pygame.event.pump()
             pygame.display.update()
-
-            # We need to ensure that human-rendering occurs at the predefined framerate.
-            # The following line will automatically add a delay to
-            # keep the framerate stable.
             self.clock.tick(self.metadata["render_fps"])
         else:  # rgb_array
             return np.transpose(
-                np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
+                np.array(pygame.surfarray.pixels3d(inv_canvas)), axes=(1, 0, 2)
             )
 
     def close(self):

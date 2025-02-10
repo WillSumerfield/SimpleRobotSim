@@ -11,15 +11,14 @@ from pynput import keyboard
 import Grasper
 
 
-FPS = 1/60.0
-
 key_presses = {
     "w": False,
     "a": False,
     "s": False,
     "d": False,
     "space": False,
-    "esc": False
+    "esc": False,
+    "enter": False,
 }
 
 
@@ -35,8 +34,6 @@ def manual_control():
 
     # Repeat until the env is complete
     while True:
-        time.sleep(FPS)
-
         # Quit the game
         if key_presses["esc"]:
             break
@@ -53,6 +50,10 @@ def manual_control():
         claw = 0 # Default to opening the claw
         if key_presses["space"]:
             claw = 1
+
+        # Reset the game
+        if key_presses["enter"]:
+            env.reset()
 
         # Take a step in the environment
         obs, reward, done, _, info = env.step(np.array([movement, claw]))
@@ -82,6 +83,8 @@ def on_press(key):
                 key_presses["space"] = True
             if key == keyboard.Key.esc:
                 key_presses["esc"] = True
+            if key == keyboard.Key.enter:
+                key_presses["enter"] = True
 
 
 def on_release(key):
@@ -103,3 +106,5 @@ def on_release(key):
                 key_presses["space"] = False
             if key == keyboard.Key.esc:
                 key_presses["esc"] = False
+            if key == keyboard.Key.enter:
+                key_presses["enter"] = False
