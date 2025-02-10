@@ -199,10 +199,10 @@ class GrasperEnv(gym.Env):
         # Walls
         pygame.draw.rect(canvas,
                          self.WALL_COLOR,
-                         pygame.Rect(self._wall_left.body.position.x-self.WALL_SIZE[0]/2, 0, self.WALL_SIZE[0], self.WALL_SIZE[1]))
+                         pygame.Rect(self._wall_left.body.position.x-self.WALL_SIZE[0]/2, self.FLOOR_Y, self.WALL_SIZE[0], self.WALL_SIZE[1]))
         pygame.draw.rect(canvas,
                          self.WALL_COLOR,
-                         pygame.Rect(self._wall_right.body.position.x-self.WALL_SIZE[0]/2, 0, self.WALL_SIZE[0], self.WALL_SIZE[1]))
+                         pygame.Rect(self._wall_right.body.position.x-self.WALL_SIZE[0]/2, self.FLOOR_Y, self.WALL_SIZE[0], self.WALL_SIZE[1]))
 
         # Ball
         pygame.draw.circle(canvas,
