@@ -50,7 +50,7 @@ def manual_control():
         claw = 0 # Default to opening the claw
         if key_presses["space"]:
             claw = 1
-
+        
         # Reset the game
         if key_presses["enter"]:
             env.reset()

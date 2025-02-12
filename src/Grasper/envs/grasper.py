@@ -20,12 +20,31 @@ class GrasperEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
     # Claw parameters
+    CLAW_COLOR = (32, 32, 32)
+    CLAW_ARM_COLOR = (128, 128, 128)
+    CLAW_BALL_RADIUS = 16
     CLAW_SPEED = 2
     CLAW_MASS = 10
-    CLAW_MIN_Y = 256
-    CLAW_HALFLENGTH = 24
-    CLAW_LEFT_VERTICES = np.array([(0, 0), (CLAW_HALFLENGTH, 0), (CLAW_HALFLENGTH, CLAW_HALFLENGTH), (0, CLAW_HALFLENGTH)])
-    CLAW_RIGHT_VERTICES = np.array([(0, 0), (CLAW_HALFLENGTH, 0), (CLAW_HALFLENGTH, CLAW_HALFLENGTH), (0, CLAW_HALFLENGTH)])
+    CLAW_MIN_Y_SPAWN = 256
+    CLAW_HALFLENGTH = 48
+    CLAW_WIDTH = 8
+    CLAW_BEND_DEG = 75
+    CLAW_MIN_RAD = -np.pi * 15/16.0
+    CLAW_MAX_RAD = -np.pi/4
+    CLAW_OFFSET = 16
+    
+    # Setup the claw vertices
+    inv_claw_bend_rad = (90-CLAW_BEND_DEG) * (np.pi/180.0)
+    claw_x_len = np.cos(inv_claw_bend_rad) * CLAW_HALFLENGTH
+    claw_y_len = np.sin(inv_claw_bend_rad) * CLAW_HALFLENGTH
+    claw_x_width = np.sin(inv_claw_bend_rad) * CLAW_WIDTH
+    claw_y_width = np.cos(inv_claw_bend_rad) * CLAW_WIDTH
+    CLAW_LEFT_VERTICES = np.array([(0, 0), (0, CLAW_HALFLENGTH+claw_x_width), 
+                                   ((CLAW_WIDTH-claw_x_width)+claw_x_len, CLAW_HALFLENGTH+claw_x_width+claw_y_len), 
+                                   (CLAW_WIDTH+claw_x_len, CLAW_HALFLENGTH+claw_y_len),
+                                   (CLAW_WIDTH, CLAW_HALFLENGTH), (CLAW_WIDTH, 0)])
+    CLAW_RIGHT_VERTICES = CLAW_LEFT_VERTICES * np.array([-1, 1])
+
     CLAW_MOI = pymunk.moment_for_poly(CLAW_MASS, CLAW_LEFT_VERTICES.tolist())
 
     BALL_RADIUS = 24
@@ -92,7 +111,7 @@ class GrasperEnv(gym.Env):
 
         # Choose the agent's location uniformly at random
         agent_location = (np.array([self.window_size[0], self.window_size[1]]) * self.np_random.random(2, dtype=float)) \
-                                + np.array([0, self.CLAW_MIN_Y])
+                                + np.array([0, self.CLAW_MIN_Y_SPAWN])
 
         self._target_location = np.array([((self.window_size[0] - 2*self.BALL_RADIUS)* self.np_random.random(dtype=float)) + self.BALL_RADIUS, 
                                           self.FLOOR_Y+self.BALL_RADIUS])
@@ -133,18 +152,29 @@ class GrasperEnv(gym.Env):
         # A point for the arms to hinge on.
         self._claw_hinge = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
         self._claw_hinge.position = agent_location.tolist()
-        # The left claw arm
+        # The claw arms
         claw_left = pymunk.Body(self.CLAW_MASS, self.CLAW_MOI, body_type=pymunk.Body.DYNAMIC)
         claw_left.position = self._claw_hinge.position
+        claw_left.angle = self.CLAW_MAX_RAD
         self._claw_left = pymunk.Poly(claw_left, self.CLAW_LEFT_VERTICES.tolist())
         self._space.add(claw_left, self._claw_left)
+        claw_right = pymunk.Body(self.CLAW_MASS, self.CLAW_MOI, body_type=pymunk.Body.DYNAMIC)
+        claw_right.position = self._claw_hinge.position
+        claw_right.angle = -self.CLAW_MAX_RAD
+        self._claw_right = pymunk.Poly(claw_right, self.CLAW_RIGHT_VERTICES.tolist())
+        self._space.add(claw_right, self._claw_right)
+
         # Pivot joints make the arms rotate around the hinge
-        pivot_joint_left = pymunk.PivotJoint(claw_left, self._claw_hinge, (0,0), (0,0))
+        pivot_joint_left = pymunk.PivotJoint(claw_left, self._claw_hinge, (0,-self.CLAW_OFFSET), (0,0))
         pivot_joint_left.error_bias = 0
-        self._space.add(pivot_joint_left)
+        pivot_joint_right = pymunk.PivotJoint(claw_right, self._claw_hinge, (0,-self.CLAW_OFFSET), (0,0))
+        pivot_joint_right.error_bias = 0
+        self._space.add(pivot_joint_left, pivot_joint_right)
         # Rotary joints limit joints to control the opening and closing of the claw arms
-        limit_joint_left = pymunk.RotaryLimitJoint(self._claw_hinge, claw_left, -np.pi/4, np.pi/4)
+        limit_joint_left = pymunk.RotaryLimitJoint(self._claw_hinge, claw_left, self.CLAW_MIN_RAD, self.CLAW_MAX_RAD)
         self._space.add(limit_joint_left)
+        limit_joint_right = pymunk.RotaryLimitJoint(self._claw_hinge, claw_right, -self.CLAW_MAX_RAD, -self.CLAW_MIN_RAD)
+        self._space.add(limit_joint_right)
 
         observation = self._get_obs()
         info = self._get_info()
@@ -158,7 +188,12 @@ class GrasperEnv(gym.Env):
 
         # Move the claw
         velocity = self.CLAW_SPEED * self._action_to_direction[action[0]]
-        self._claw_hinge.position = np.clip(self._claw_hinge.position + velocity, 0, self.window_size-1).tolist()
+        self._claw_hinge.position = np.clip(self._claw_hinge.position + velocity, self.FLOOR_Y+4*self.BALL_RADIUS, self.window_size-1).tolist()
+
+        # Apply force to the claw
+        force = -10000 if action[1] == 1 else 10000
+        self._claw_left.body.apply_force_at_local_point((0, force), (self.CLAW_HALFLENGTH, self.CLAW_HALFLENGTH))
+        self._claw_right.body.apply_force_at_local_point((0, force), (-self.CLAW_HALFLENGTH, -self.CLAW_HALFLENGTH))
 
         self._space.step(self.PHYSICS_TIMESTEP)
 
@@ -209,23 +244,27 @@ class GrasperEnv(gym.Env):
                            (255, 0, 0),
                            self._ball.body.position,
                            self.BALL_RADIUS)
-        
-        # Goal
-        pygame.draw.circle(canvas,
-                           (239, 191, 4),
-                           self._target_location,
-                           self.GOAL_RADIUS)
 
         # Claw
+        pygame.draw.rect(canvas,
+                        self.CLAW_ARM_COLOR,
+                        pygame.Rect(self._claw_hinge.position.x-self.WALL_SIZE[0]/2, self._claw_hinge.position.y+self.CLAW_OFFSET/4, 
+                                    self.WALL_SIZE[0], self.window_size[1]-self._claw_hinge.position.y))
         pygame.draw.circle(canvas,
-                           (239, 191, 4),
-                           self._claw_hinge.position,
-                           self.GOAL_RADIUS)
+                           self.CLAW_ARM_COLOR,
+                           (self._claw_hinge.position.x, self._claw_hinge.position.y+self.CLAW_OFFSET/4),
+                           self.CLAW_BALL_RADIUS)
         pygame.draw.polygon(
             canvas,
-            (0, 0, 255),
+            self.CLAW_COLOR,
             np.array([self._claw_left.body.position]) + rotate_vertices(self.CLAW_LEFT_VERTICES,
                                                                     self._claw_left.body.angle)
+        )
+        pygame.draw.polygon(
+            canvas,
+            self.CLAW_COLOR,
+            np.array([self._claw_right.body.position]) + rotate_vertices(self.CLAW_RIGHT_VERTICES,
+                                                                    self._claw_right.body.angle)
         )
 
         inv_canvas = pygame.transform.flip(canvas, False, True) # Invert Y
