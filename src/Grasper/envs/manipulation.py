@@ -16,7 +16,7 @@ class ClawActions(Enum):
     open = 0
     close = 1
 
-class GrasperEnv(gym.Env):
+class ManipulationEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
     # Claw parameters

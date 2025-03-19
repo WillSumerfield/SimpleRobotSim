@@ -2,8 +2,6 @@
 Play the game manually using the keyboard
 """
 
-import time
-
 import gymnasium as gym
 import numpy as np
 from pynput import keyboard
@@ -22,10 +20,18 @@ key_presses = {
 }
 
 
-def manual_control():
+def manual_control(env):
     global key_presses
 
-    env = gym.make('Grasper/Grasper-v0', render_mode="human")
+    # Choose env
+    if env == "manipulation":
+        env_name = "Grasper/Manipulation-v0"
+    elif env == "claw_game":
+        env_name = "Grasper/ClawGame-v0"
+    else:
+        raise ValueError("Invalid environment")
+
+    env = gym.make(env_name, render_mode="human")
     env.reset()
 
     # Start a separate pynput listener thread
