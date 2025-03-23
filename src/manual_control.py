@@ -73,9 +73,9 @@ def manual_control(env):
             env.reset()
 
         # Take a step in the environment
-        obs, reward, done, _, info = env.step(np.array([movement, rotation, open_hand]))
+        obs, reward, terminated, truncated, info = env.step(np.array([movement, rotation, open_hand]))
         env.render()
-        if done:
+        if terminated or truncated:
             env.reset()
 
     env.close()

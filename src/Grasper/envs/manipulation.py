@@ -171,7 +171,7 @@ class Object():
 class ManipulationEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    GOAL_RADIUS = 8
+    GOAL_RADIUS = 32
     GOAL_ROTATION = 0.1
     GRAVITY = -256
     PHYSICS_TIMESTEP = 1/50
@@ -232,6 +232,8 @@ class ManipulationEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
+        self._elapsed_steps = 0
+
         self._space = pymunk.Space()
         self._space.gravity = (0, self.GRAVITY)
 
@@ -253,13 +255,20 @@ class ManipulationEnv(gym.Env):
         return observation, info
 
     def step(self, action):
+        self._elapsed_steps += 1
+
         # Physics
         self._hand.move(self._action_to_direction[action[0]], self._action_to_rotation[action[1]], action[2] == ClawActions.open.value)
         self._space.step(self.PHYSICS_TIMESTEP)
 
+        # Check if terminated
+        obj_outofbounds = self._object._body.position[0] < 0 or self._object._body.position[0] > self.window_size[0] or self._object._body.position[1] > self.window_size[1]
+        timeout = self._elapsed_steps >= 1000
+        truncated = obj_outofbounds or timeout
+
         # Check if goal is reached
         goal_dist = np.linalg.norm(np.array([self._object._body.position]) - self._target_position[:2])
-        goal_angle_dist = np.abs(self._object._body.angle - self._target_position[2])
+        goal_angle_dist = 0 #np.abs(self._object._body.angle - self._target_position[2])
         terminated = (goal_dist <= self.GOAL_RADIUS) and (goal_angle_dist <= self.GOAL_ROTATION)
 
         reward = 1 if terminated else 0
@@ -268,7 +277,7 @@ class ManipulationEnv(gym.Env):
 
         if self.render_mode == "human":
             self._render_frame()
-        return observation, reward, terminated, False, info
+        return observation, reward, terminated, truncated, info
 
     def render(self):
         if self.render_mode == "rgb_array":
@@ -290,6 +299,7 @@ class ManipulationEnv(gym.Env):
         self._floor.draw(canvas)
         self._object.draw(canvas)
         self._hand.draw(canvas)
+        pygame.draw.circle(canvas, (0, 255, 0), self._target_position[:2], self.GOAL_RADIUS)
 
         inv_canvas = pygame.transform.flip(canvas, False, True) # Invert Y
         if self.render_mode == "human":
