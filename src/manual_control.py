@@ -14,6 +14,8 @@ key_presses = {
     "a": False,
     "s": False,
     "d": False,
+    "q": False,
+    "e": False,
     "space": False,
     "esc": False,
     "enter": False,
@@ -46,23 +48,32 @@ def manual_control(env):
 
         # Handle player input
         movement = 0 # Default to 'up'
-        if key_presses["s"]:
+        if key_presses["w"]:
             movement = 1
-        if key_presses["a"]:
+        if key_presses["s"]:
             movement = 2
-        if key_presses["d"]:
+        if key_presses["a"]:
             movement = 3
+        if key_presses["d"]:
+            movement = 4
 
-        claw = 0 # Default to opening the claw
+        # Rotation
+        rotation = 0
+        if key_presses["q"]:
+            rotation = 1
+        if key_presses["e"]:
+            rotation = 2
+
+        open_hand = 0 # Default to opening the claw
         if key_presses["space"]:
-            claw = 1
+            open_hand = 1
         
         # Reset the game
         if key_presses["enter"]:
             env.reset()
 
         # Take a step in the environment
-        obs, reward, done, _, info = env.step(np.array([movement, claw]))
+        obs, reward, done, _, info = env.step(np.array([movement, rotation, open_hand]))
         env.render()
         if done:
             env.reset()
@@ -83,6 +94,10 @@ def on_press(key):
                 key_presses["a"] = True
             if key.char == "d":
                 key_presses["d"] = True
+            if key.char == "e":
+                key_presses["e"] = True
+            if key.char == "q":
+                key_presses["q"] = True
         
         except AttributeError:
             if key == keyboard.Key.space:
@@ -106,6 +121,10 @@ def on_release(key):
                 key_presses["a"] = False
             if key.char == "d":
                 key_presses["d"] = False
+            if key.char == "e":
+                key_presses["e"] = False
+            if key.char == "q":
+                key_presses["q"] = False
         
         except AttributeError:
             if key == keyboard.Key.space:
