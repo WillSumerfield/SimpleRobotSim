@@ -7,7 +7,7 @@ import pymunk
 
 
 # Constants
-WINDOW_SIZE = np.array([768, 512])  # The size of the space
+WINDOW_SIZE = np.array([512, 384])  # The size of the space
 FLOOR_Y = 32
 FLOOR_COLOR = (64, 64, 64)
 PI2 = 2*np.pi
@@ -52,7 +52,7 @@ class Hand():
     BASE_COLOR = (0, 0, 0)
     SEGMENT_COLOR = (128, 128, 128)
     BASE_RADIUS = 32
-    MIN_Y_SPAWN = 64
+    MIN_Y_SPAWN = 256
     MAX_ANGLE = np.pi * (15/16.0)
     MIN_ANGLE = HPI
     DIGIT_ANGLE = np.pi/4
@@ -217,7 +217,7 @@ class ManipulationEnv(gym.Env):
 
 
     def __init__(self, render_mode=None):
-        self.window_size = np.array([768, 512])  # The size of the PyGame window
+        super().__init__()
         
         # What the agent sees
         self.observation_space = spaces.Dict(
@@ -281,8 +281,8 @@ class ManipulationEnv(gym.Env):
         self._hand = Hand(self._space, self.np_random)
         self._object = Object(self._space, self.np_random)
 
-        self._target_position = np.array([((self.window_size[0] - 2*self._object.SIZE)*self.np_random.random(dtype=float)) + self._object.SIZE, 
-                                          ((self.window_size[1] - 2*self._object.SIZE - self._hand.MIN_Y_SPAWN - self.TARGET_Y_BUFFER)*self.np_random.random(dtype=float)) + 
+        self._target_position = np.array([((WINDOW_SIZE[0] - 2*self._object.SIZE)*self.np_random.random(dtype=float)) + self._object.SIZE, 
+                                          ((WINDOW_SIZE[1] - 2*self._object.SIZE - self._hand.MIN_Y_SPAWN - self.TARGET_Y_BUFFER)*self.np_random.random(dtype=float)) + 
                                             self._object.SIZE + self._hand.MIN_Y_SPAWN,
                                             self.np_random.uniform(-np.pi, np.pi)])
 
@@ -301,7 +301,7 @@ class ManipulationEnv(gym.Env):
         self._space.step(self.PHYSICS_TIMESTEP)
 
         # Check if terminated
-        obj_outofbounds = self._object._body.position[0] < 0 or self._object._body.position[0] > self.window_size[0] or self._object._body.position[1] > self.window_size[1]
+        obj_outofbounds = self._object._body.position[0] < 0 or self._object._body.position[0] > WINDOW_SIZE[0] or self._object._body.position[1] > WINDOW_SIZE[1]
         timeout = self._elapsed_steps >= 1000
         truncated = obj_outofbounds or timeout
 
@@ -327,12 +327,12 @@ class ManipulationEnv(gym.Env):
             if self.window is None:
                 pygame.init()
                 pygame.display.init()
-                self.window = pygame.display.set_mode((self.window_size[0], self.window_size[1]))
+                self.window = pygame.display.set_mode((WINDOW_SIZE[0], WINDOW_SIZE[1]))
             if self.clock is None:
                 self.clock = pygame.time.Clock()
 
         if self.render_mode:
-            canvas = pygame.Surface((self.window_size[0], self.window_size[1]))
+            canvas = pygame.Surface((WINDOW_SIZE[0], WINDOW_SIZE[1]))
             canvas.fill((255, 255, 255))
 
         self._floor.draw(canvas)
