@@ -97,16 +97,18 @@ class Hand():
         space.add(self._segment_ur_body, self._segment_ur)
 
         # Digit lower segments
+        left_offset = rotate_vertices(np.array([0, self.SEGMENT_SIZE[1]]), self._segment_ul_body.angle)
+        right_offset = rotate_vertices(np.array([0, self.SEGMENT_SIZE[1]]), self._segment_ur_body.angle)
         self._segment_ll_body = pymunk.Body(self.SEGMENT_MASS, self.SEGMENT_MOI, body_type=pymunk.Body.DYNAMIC)
-        self._segment_ll_body.position = self._segment_ul_body.position + (self.SEGMENT_SIZE[1] * np.array([0, -1]))
-        self._segment_ll_body.angle = self.MAX_ANGLE
+        self._segment_ll_body.position = self._segment_ul_body.position + left_offset
+        self._segment_ll_body.angle = self._segment_ul_body.angle + self.DIGIT_ANGLE
         self._segment_ll = pymunk.Poly(self._segment_ll_body, self.SEGMENT_VERTICES)
         self._segment_ll.friction = self.SEGMENT_FRICTION
         self._segment_ll.filter = self.SEGMENT_COLLISION_FILTER
         space.add(self._segment_ll_body, self._segment_ll)
         self._segment_lr_body = pymunk.Body(self.SEGMENT_MASS, self.SEGMENT_MOI, body_type=pymunk.Body.DYNAMIC)
-        self._segment_lr_body.position = self._segment_ur_body.position + (self.SEGMENT_SIZE[1] * np.array([0, -1]))
-        self._segment_lr_body.angle = -self.MAX_ANGLE
+        self._segment_lr_body.position = self._segment_ur_body.position + right_offset
+        self._segment_lr_body.angle = self._segment_ur_body.angle - self.DIGIT_ANGLE
         self._segment_lr = pymunk.Poly(self._segment_lr_body, self.SEGMENT_VERTICES)
         self._segment_lr.friction = self.SEGMENT_FRICTION
         self._segment_lr.filter = self.SEGMENT_COLLISION_FILTER
