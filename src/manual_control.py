@@ -25,15 +25,8 @@ key_presses = {
 def manual_control(env):
     global key_presses
 
-    # Choose env
-    if env == "manipulation":
-        env_name = "Grasper/Manipulation-v0"
-    elif env == "claw_game":
-        env_name = "Grasper/ClawGame-v0"
-    else:
-        raise ValueError("Invalid environment")
-
-    env = gym.make(env_name, render_mode="human")
+    env = gym.make(env, render_mode="human")
+    env = Grasper.wrappers.BetterExploration(env)
     env.reset()
 
     # Start a separate pynput listener thread
@@ -74,6 +67,7 @@ def manual_control(env):
 
         # Take a step in the environment
         obs, reward, terminated, truncated, info = env.step(np.array([movement, rotation, open_hand]))
+        print(np.linalg.norm(obs[4:6]) / np.sqrt(2), end='\r')
         env.render()
         if terminated or truncated:
             env.reset()

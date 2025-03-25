@@ -214,19 +214,14 @@ class ManipulationEnv(gym.Env):
     GRAVITY = -256
     PHYSICS_TIMESTEP = 1/50
     TARGET_Y_BUFFER = 32
+    MAX_TIME = 400
 
 
     def __init__(self, render_mode=None):
         super().__init__()
         
         # What the agent sees
-        self.observation_space = spaces.Dict(
-            {
-                "agent_state":  spaces.Box(0, 1, shape=(4,), dtype=float), # Agent x,y,digit1_angle,digit2_angle
-                "object_state": spaces.Box(0, 1, shape=(3,), dtype=float), # Object x,y,theta
-                "target_state": spaces.Box(0, 1, shape=(3,), dtype=float), # Target x,y,theta
-            }
-        )
+        self.observation_space = spaces.Box(-1, 1, shape=(10,), dtype=float) # Agent x,y,digit1_angle,digit2_angle, Object x,y,angle, Target x,y,angle
 
         # What the agent can do
         self.action_space = spaces.MultiDiscrete([5, 3, 2]) # 5 movement, 3 rotation, 2 claw
@@ -259,12 +254,8 @@ class ManipulationEnv(gym.Env):
         self.clock = None
 
     def _get_obs(self):
-        return  {
-                    "agent_state": self._hand.get_state(), 
-                    "object_state": self._object.get_state(),
-                    "target_state": self._target_position
-                }
-
+        return np.concat((self._hand.get_state(), self._object.get_state(), self._obs_target_position), dtype=float)
+    
     def _get_info(self):
         return {}
 
@@ -285,6 +276,7 @@ class ManipulationEnv(gym.Env):
                                           ((WINDOW_SIZE[1] - 2*self._object.SIZE - self._hand.MIN_Y_SPAWN - self.TARGET_Y_BUFFER)*self.np_random.random(dtype=float)) + 
                                             self._object.SIZE + self._hand.MIN_Y_SPAWN,
                                             self.np_random.uniform(-np.pi, np.pi)])
+        self._obs_target_position = self._target_position / np.array([WINDOW_SIZE[0], WINDOW_SIZE[1], np.pi])
 
         observation = self._get_obs()
         info = self._get_info()
@@ -302,15 +294,15 @@ class ManipulationEnv(gym.Env):
 
         # Check if terminated
         obj_outofbounds = self._object._body.position[0] < 0 or self._object._body.position[0] > WINDOW_SIZE[0] or self._object._body.position[1] > WINDOW_SIZE[1]
-        timeout = self._elapsed_steps >= 1000
+        timeout = self._elapsed_steps >= self.MAX_TIME
         truncated = obj_outofbounds or timeout
 
         # Check if goal is reached
         goal_dist = np.linalg.norm(np.array([self._object._body.position]) - self._target_position[:2])
         goal_angle_dist = 0 #np.abs(self._object._body.angle - self._target_position[2])
-        terminated = (goal_dist <= self.GOAL_RADIUS) and (goal_angle_dist <= self.GOAL_ROTATION)
+        terminated = bool((goal_dist <= self.GOAL_RADIUS) and (goal_angle_dist <= self.GOAL_ROTATION))
 
-        reward = 1 if terminated else 0
+        reward = 100 if terminated else (-20 if obj_outofbounds else -1)
         observation = self._get_obs()
         info = self._get_info()
 
