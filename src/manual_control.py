@@ -67,7 +67,6 @@ def manual_control(env):
 
         # Take a step in the environment
         obs, reward, terminated, truncated, info = env.step(np.array([movement, rotation, open_hand]))
-        print(np.linalg.norm(obs[4:6]) / np.sqrt(2), end='\r')
         env.render()
         if terminated or truncated:
             env.reset()

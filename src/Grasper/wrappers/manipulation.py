@@ -1,6 +1,4 @@
 import gymnasium as gym
-from gymnasium import spaces
-from gymnasium.wrappers import TransformObservation
 import numpy as np
 
 SQ2 = np.sqrt(2)
@@ -13,16 +11,27 @@ class BetterExploration(gym.Wrapper):
         obs, reward, done, truncated, info = self.env.step(action)
 
         # Modify the obs to be relative to the agent
-        #print(obs["agent_state"][:2], obs["object_state"][:2], obs["target_state"][:2], end='\r')
         obs[4:6] = obs[4:6] - obs[:2]
         obs[7:9] = obs[7:9] - obs[:2]
-        obs[:2] = 0
 
         # Use more iterative rewards to enable better exploration
         dist_to_obj = np.linalg.norm(obs[4:6]) / SQ2
         dist_to_target = np.linalg.norm(obs[7:9]) / SQ2
+        near_target = np.abs(obs[4]) < 0.05 and np.abs(obs[5]) < 0.25
+        closed_hand = obs[2] > 0.4 and obs[3] < -0.4
         
-        reward = -dist_to_obj if dist_to_obj > 0.15 else (1-dist_to_target)
+        # If the object has the target, reward the agent for moving the object to the target
+        if near_target:
+            if closed_hand:
+                reward = (1-dist_to_target)
+            else:
+                reward = -0.1
+        # If the hand is not near the object, reward the agent for moving the hand to the object
+        else:
+            if action[2] == 1:
+                reward = -dist_to_obj
+            else:
+                reward = -1
         if done:
             reward = 1000
         
