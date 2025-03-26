@@ -19,6 +19,11 @@ from Grasper.wrappers import BetterExploration
 
 
 ENTROPY = 0.1
+CHECKPOINTS_FOLDER = "./checkpoints"
+CHECKPOINT_NAME = "ppo_grasper"
+VIDEOS_FOLDER = "./videos"
+LOGS_FOLDER = "./training_logs"
+PPO_ARGS = { "verbose": 1, "device": "cpu", "ent_coef": ENTROPY, "tensorboard_log": LOGS_FOLDER }
 
 
 def _make_env(env_id, record=False):
@@ -32,8 +37,7 @@ def _make_env(env_id, record=False):
     if not record:
         check_env(env)
     else:
-        env = gym.wrappers.RecordVideo(env, video_folder='./videos', 
-                                       episode_trigger=lambda x: True, disable_logger=True)
+        env = gym.wrappers.RecordVideo(env, video_folder=VIDEOS_FOLDER, episode_trigger=lambda x: True, disable_logger=True)
     return env
 
 def train_agent(env_id, continue_training=False, total_timesteps=1e8):
@@ -48,28 +52,28 @@ def train_agent(env_id, continue_training=False, total_timesteps=1e8):
         n_eval_episodes=25,  # Average over 5 episodes
         deterministic=True
     )
-    checkpoint_callback = CheckpointCallback(save_freq=1e4, save_path="./checkpoints", name_prefix="ppo_grasper")
+    checkpoint_callback = CheckpointCallback(save_freq=1e4, save_path=CHECKPOINTS_FOLDER, name_prefix=CHECKPOINT_NAME)
     
     # Load or create model
     if continue_training:
-        checkpoint_files = glob.glob("./checkpoints/ppo_grasper_*.zip")
+        checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/{CHECKPOINT_NAME}_*.zip")
         if not checkpoint_files:
             raise FileNotFoundError("No saved model or checkpoints found.")
         latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
-        model = PPO.load(latest_checkpoint, env=envs, verbose=1, device="cpu", ent_coef=ENTROPY)
+        model = PPO.load(latest_checkpoint, envs, **PPO_ARGS)
     else:
-        model = PPO("MlpPolicy", envs, verbose=1, device="cpu", ent_coef=ENTROPY)
+        model = PPO("MlpPolicy", envs, **PPO_ARGS)
 
     # Train model
     model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, eval_callback])
-    model.save("ppo_grasper")
+    model.save(CHECKPOINT_NAME)
 
 def test_agent(env_id, n_eval_episodes=5):
     # Find latest checkpoint
-    model_path = "ppo_grasper.zip"
+    model_path = f"{CHECKPOINT_NAME}.zip"
     if not os.path.exists(model_path):
         # Find the latest checkpoint
-        checkpoint_files = glob.glob("./checkpoints/ppo_grasper_*.zip")
+        checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/{CHECKPOINT_NAME}_*.zip")
         if not checkpoint_files:
             raise FileNotFoundError("No saved model or checkpoints found.")
         latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
@@ -95,4 +99,4 @@ def test_agent(env_id, n_eval_episodes=5):
         if done:
             break
     env.close()
-    print(f"Video saved to 'videos' folder.")
+    print(f"Video saved to {VIDEOS_FOLDER} folder.")
