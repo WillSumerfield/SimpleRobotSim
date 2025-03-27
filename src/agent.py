@@ -96,7 +96,7 @@ def test_agent(env_id, n_eval_episodes=5):
         action, _states = model.predict(obs, deterministic=True)
         obs, reward, done, terminated, info = env.step(action)
         env.render()
-        if done:
+        if done or terminated:
             break
     env.close()
     print(f"Video saved to {VIDEOS_FOLDER} folder.")
