@@ -12,6 +12,7 @@ FLOOR_Y = 32
 FLOOR_COLOR = (64, 64, 64)
 PI2 = 2*np.pi
 HPI = np.pi/2
+DOME_PRECISION = 12
 
 def get_rect_vertices(size):
     return [
@@ -27,6 +28,14 @@ def rotate_vertices(vertices: np.ndarray, angle: float):
         [np.sin(angle), np.cos(angle)]
     ])
     return np.dot(vertices, rotation_matrix.T)
+
+def get_dome_vertices(size):
+    vertices = [(size, 0)]
+    for i in range(DOME_PRECISION):
+        angle1 = np.pi * (i+1) / DOME_PRECISION
+        new_point = (size * np.cos(angle1), size * np.sin(angle1))
+        vertices.append(new_point)
+    return vertices
 
 
 class MoveActions(Enum):
@@ -182,30 +191,100 @@ class Floor():
         pygame.draw.rect(canvas, FLOOR_COLOR, (0, 0, WINDOW_SIZE[0], FLOOR_Y))
 
 class Object():
-    SIZE = 24
+
+    class ObjectTypes(Enum):
+        circle = 0
+        square = 1
+        dome   = 2
+        sheet  = 3
+        cross  = 4
+
+    COLOR = (255, 0, 0)
+    SIZE = 48
     MASS = 1
     FRICTION = 0.5
     SPAWN_X_BUFFER = 32
 
+    CIRCLE_MOI = pymunk.moment_for_circle(MASS, 0, SIZE/2)
+    SQUARE_MOI = pymunk.moment_for_box(MASS, (SIZE, SIZE))
+    SHEET_HEIGHT = SIZE/4
+    SHEET_MOI = pymunk.moment_for_box(MASS, (SIZE*2, SHEET_HEIGHT))
+    DOME_VERTICES = get_dome_vertices(SIZE/2)
+    DOME_MOI = pymunk.moment_for_poly(MASS, DOME_VERTICES)
+    CROSS_WIDTH = SIZE/8
+    CROSS_MOI = 2*pymunk.moment_for_box(MASS/2, (SIZE, CROSS_WIDTH))
+
 
     def __init__(self, space, rng):
-        self._body = pymunk.Body(1, pymunk.moment_for_circle(self.MASS, 0, self.SIZE), body_type=pymunk.Body.DYNAMIC)
+        # Setup the object
+        self._type = rng.choice(list(self.ObjectTypes))
+        self._type_vec = np.zeros(len(self.ObjectTypes), dtype=float)
+        self._type_vec[self._type.value] = 1
+        if self._type == self.ObjectTypes.circle:
+            self._body = pymunk.Body(1, self.CIRCLE_MOI, body_type=pymunk.Body.DYNAMIC)
+            self._shape = pymunk.Circle(self._body, self.SIZE/2)
+        elif self._type == self.ObjectTypes.square:
+            self._body = pymunk.Body(1, self.SQUARE_MOI, body_type=pymunk.Body.DYNAMIC)
+            self._shape = pymunk.Poly.create_box(self._body, (self.SIZE, self.SIZE))
+        elif self._type == self.ObjectTypes.dome:
+            self._body = pymunk.Body(1, self.CROSS_MOI, body_type=pymunk.Body.DYNAMIC)
+            self._shape = pymunk.Poly(self._body, self.DOME_VERTICES)
+        elif self._type == self.ObjectTypes.sheet:
+            self._body = pymunk.Body(1, self.SHEET_MOI, body_type=pymunk.Body.DYNAMIC)
+            self._shape = pymunk.Poly.create_box(self._body, (self.SIZE*2, self.SHEET_HEIGHT))
+        else: # Cross
+            self._body = pymunk.Body(1, self.CROSS_MOI, body_type=pymunk.Body.DYNAMIC)
+            self._shape = pymunk.Poly.create_box(self._body, (self.SIZE, self.CROSS_WIDTH))
+            self._shape2 = pymunk.Poly.create_box(self._body, (self.CROSS_WIDTH, self.SIZE))
+            self._shape2.angle = np.pi/2
+            self._shape2.friction = self.FRICTION
+            self._shape2.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
+
+        # Set the object's properties
         self._body.position = ((WINDOW_SIZE[0]-2*self.SPAWN_X_BUFFER)*rng.random(dtype=float) + self.SPAWN_X_BUFFER, FLOOR_Y+self.SIZE)
-        self._shape = pymunk.Circle(self._body, self.SIZE)
         self._shape.friction = self.FRICTION
         self._shape.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
-        space.add(self._body, self._shape)
+
+        if self._type == self.ObjectTypes.cross:
+            space.add(self._body, self._shape, self._shape2)
+        else:
+            space.add(self._body, self._shape)
 
     def get_state(self):
         return np.array([self._body.position[0]/WINDOW_SIZE[0], 
                         self._body.position[1]/WINDOW_SIZE[1], 
                         self._body.angle/PI2])
     
+    def get_type(self):
+        return self._type_vec
+    
     def draw(self, canvas):
-        pygame.draw.circle(canvas,
-                           (255, 0, 0),
-                           self._body.position,
-                           self.SIZE)
+        if self._type == self.ObjectTypes.circle:
+            pygame.draw.circle(canvas,
+                               self.COLOR,
+                               self._body.position,
+                               self.SIZE/2)
+        elif self._type == self.ObjectTypes.square:
+            pygame.draw.polygon(canvas,
+                                self.COLOR,
+                                np.array([self._body.position]) +
+                                rotate_vertices(np.array(get_rect_vertices((self.SIZE, self.SIZE)) - np.array([self.SIZE/2, self.SIZE/2])), self._body.angle))
+        elif self._type == self.ObjectTypes.dome:
+            pygame.draw.polygon(canvas,
+                                self.COLOR,
+                                np.array([self._body.position]) + rotate_vertices(self.DOME_VERTICES, self._body.angle))
+        elif self._type == self.ObjectTypes.sheet:
+            pygame.draw.polygon(canvas,
+                                self.COLOR,
+                                np.array([self._body.position]) + 
+                                rotate_vertices(np.array(get_rect_vertices((self.SIZE*2, self.SHEET_HEIGHT)) - np.array([self.SIZE, self.SHEET_HEIGHT/2])), self._body.angle))
+        else: # Cross
+            pygame.draw.polygon(canvas,
+                                self.COLOR,
+                                np.array([self._body.position]) + rotate_vertices(self._shape.get_vertices(), self._body.angle))
+            pygame.draw.polygon(canvas,
+                                self.COLOR,
+                                np.array([self._body.position]) + rotate_vertices(self._shape2.get_vertices(), self._body.angle))
 
 
 class ManipulationEnv(gym.Env):
@@ -218,12 +297,18 @@ class ManipulationEnv(gym.Env):
     TARGET_Y_BUFFER = 32
     MAX_TIME = 400
 
+    AGENT_SPACE = 4 # x, y, digit_angle1, digit_angle2
+    OBJECT_SPACE = 3 # x, y, angle
+    TARGET_SPACE = 3 # x, y, angle
+    OBJECT_TYPES = len(Object.ObjectTypes)
+    OBS_SPACE = AGENT_SPACE + OBJECT_SPACE + TARGET_SPACE + OBJECT_TYPES
+
 
     def __init__(self, render_mode=None):
         super().__init__()
         
         # What the agent sees
-        self.observation_space = spaces.Box(-1, 1, shape=(10,), dtype=float) # Agent x,y,digit1_angle,digit2_angle, Object x,y,angle, Target x,y,angle
+        self.observation_space = spaces.Box(-1, 1, shape=(self.OBS_SPACE,), dtype=float)
 
         # What the agent can do
         self.action_space = spaces.MultiDiscrete([5, 3, 2]) # 5 movement, 3 rotation, 2 claw
@@ -256,7 +341,7 @@ class ManipulationEnv(gym.Env):
         self.clock = None
 
     def _get_obs(self):
-        return np.concat((self._hand.get_state(), self._object.get_state(), self._obs_target_position), dtype=float)
+        return np.concat((self._hand.get_state(), self._object.get_state(), self._obs_target_position, self._object.get_type()), dtype=float)
     
     def _get_info(self):
         return {}
@@ -268,6 +353,7 @@ class ManipulationEnv(gym.Env):
 
         self._space = pymunk.Space()
         self._space.gravity = (0, self.GRAVITY)
+        self._space.collision_slop = 0.5
 
         # Add the objects to the physical space
         self._floor = Floor(self._space)
