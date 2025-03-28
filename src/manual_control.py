@@ -53,9 +53,9 @@ def manual_control(env):
         # Rotation
         rotation = 0
         if key_presses["q"]:
-            rotation = 1
-        if key_presses["e"]:
             rotation = 2
+        if key_presses["e"]:
+            rotation = 1
 
         open_hand = 0 # Default to opening the claw
         if key_presses["space"]:
@@ -69,6 +69,7 @@ def manual_control(env):
         obs, reward, terminated, truncated, info = env.step(np.array([movement, rotation, open_hand]))
         env.render()
         if terminated or truncated:
+            print(f"Game ended from {'termination' if terminated else 'truncation'}. Total reward: {env._total_reward}")
             env.reset()
 
     env.close()

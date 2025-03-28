@@ -58,6 +58,7 @@ class ClawActions(Enum):
 
 class Hand():
     MOVE_SPEED = 3
+    ROTATION_SPEED = np.pi/60
     BASE_COLOR = (0, 0, 0)
     SEGMENT_COLOR = (128, 128, 128)
     BASE_RADIUS = 32
@@ -144,6 +145,7 @@ class Hand():
     def move(self, direction, rotation, open_hand):
         velocity = self.MOVE_SPEED * direction
         self._hinge.position = np.clip(np.array([self._hinge.position])+velocity, self.MIN_POS, self.MAX_POS)[-1].tolist()
+        self._hinge.angle = self._hinge.angle + (rotation * self.ROTATION_SPEED)
 
         # Apply force to the digits
         force = self.FORCE if open_hand else -self.FORCE
@@ -156,7 +158,8 @@ class Hand():
 
     def get_state(self):
         return np.array([self._hinge.position[0]/WINDOW_SIZE[0], 
-                        self._hinge.position[1]/WINDOW_SIZE[1], 
+                        self._hinge.position[1]/WINDOW_SIZE[1],
+                        (self._hinge.angle % PI2) / PI2,
                         self._segment_ul_body.angle/PI2,
                         self._segment_ur_body.angle/PI2])
  
@@ -285,19 +288,22 @@ class Object():
             pygame.draw.polygon(canvas,
                                 self.COLOR,
                                 np.array([self._body.position]) + rotate_vertices(self._shape2.get_vertices(), self._body.angle))
+            
+        # Draw the angle
+        pygame.draw.line(canvas, (0, 0, 0), self._body.position, self._body.position + (self.SIZE/2)*np.array([np.cos(self._body.angle), np.sin(self._body.angle)]))
 
 
 class ManipulationEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
     GOAL_RADIUS = 32
-    GOAL_ROTATION = 0.1
+    GOAL_ROTATION = np.pi/4
     GRAVITY = -256
     PHYSICS_TIMESTEP = 1/50
     TARGET_Y_BUFFER = 32
-    MAX_TIME = 400
+    MAX_TIME = 1000
 
-    AGENT_SPACE = 4 # x, y, digit_angle1, digit_angle2
+    AGENT_SPACE = 5 # x, y, body_angle, digit_angle1, digit_angle2
     OBJECT_SPACE = 3 # x, y, angle
     TARGET_SPACE = 3 # x, y, angle
     OBJECT_TYPES = len(Object.ObjectTypes)
@@ -387,7 +393,8 @@ class ManipulationEnv(gym.Env):
 
         # Check if goal is reached
         goal_dist = np.linalg.norm(np.array([self._object._body.position]) - self._target_position[:2])
-        goal_angle_dist = 0 #np.abs(self._object._body.angle - self._target_position[2])
+        goal_angle_diff = np.abs((self._object._body.angle % PI2) - self._target_position[2])
+        goal_angle_dist = min(goal_angle_diff, PI2 - goal_angle_diff)
         terminated = bool((goal_dist <= self.GOAL_RADIUS) and (goal_angle_dist <= self.GOAL_ROTATION))
 
         reward = 100 if terminated else (-20 if obj_outofbounds else -1)
@@ -419,6 +426,7 @@ class ManipulationEnv(gym.Env):
         self._object.draw(canvas)
         self._hand.draw(canvas)
         pygame.draw.circle(canvas, (0, 255, 0), self._target_position[:2], self.GOAL_RADIUS)
+        pygame.draw.line(canvas, (0, 0, 0), self._target_position[:2], self._target_position[:2] + self.GOAL_RADIUS*np.array([np.cos(self._target_position[2]), np.sin(self._target_position[2])]))
 
         inv_canvas = pygame.transform.flip(canvas, False, True) # Invert Y
         if self.render_mode == "human":
