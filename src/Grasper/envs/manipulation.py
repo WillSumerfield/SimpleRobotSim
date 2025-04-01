@@ -303,6 +303,11 @@ class ManipulationEnv(gym.Env):
     OBJECT_TYPES = len(Object.ObjectTypes)
     OBS_SPACE = AGENT_SPACE + OBJECT_SPACE + TARGET_SPACE + OBJECT_TYPES
 
+    MOVEMENT_SPACE = 5 # up, down, left, right, none
+    ROTATION_SPACE = 3 # clockwise, counterclockwise, none
+    OPEN_SPACE = 2 # open, close
+    ACTION_SPACE = MOVEMENT_SPACE + ROTATION_SPACE + OPEN_SPACE
+
 
     def __init__(self, render_mode=None):
         super().__init__()
@@ -311,7 +316,7 @@ class ManipulationEnv(gym.Env):
         self.observation_space = spaces.Box(-1, 1, shape=(self.OBS_SPACE,), dtype=float)
 
         # What the agent can do
-        self.action_space = spaces.MultiDiscrete([5, 3, 2]) # 5 movement, 3 rotation, 2 claw
+        self.action_space = spaces.MultiDiscrete([self.MOVEMENT_SPACE, self.ROTATION_SPACE, self.OPEN_SPACE])
 
         self._action_to_direction = {
             MoveActions.none.value:  np.array([0,  0]),
