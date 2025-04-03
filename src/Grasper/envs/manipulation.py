@@ -50,9 +50,9 @@ class RotateActions(Enum):
     clockwise = 1
     counterclockwise = 2
 
-class ClawActions(Enum):
-    none = 0,
-    open = 1,
+class HandActions(Enum):
+    none = 0
+    open = 1
     close = 2
 
 
@@ -146,7 +146,7 @@ class Hand():
         self._hinge.position = np.clip(np.array([self._hinge.position])+velocity, self.MIN_POS, self.MAX_POS)[-1].tolist()
 
         # Apply force to the digits
-        force = self.FORCE if open_hand else -self.FORCE
+        force = self.FORCE * open_hand
         force_direction_l = np.array([np.cos(self._segment_ul_body.angle), np.sin(self._segment_ul_body.angle)]) * force
         force_direction_r = force_direction_l * np.array([-1, 1])
         force_position_l = rotate_vertices(np.array([self.SEGMENT_SIZE[0]/2, self.SEGMENT_SIZE[1]]), self._segment_ul_body.angle)
@@ -305,7 +305,7 @@ class ManipulationEnv(gym.Env):
 
     MOVEMENT_SPACE = 5 # up, down, left, right, none
     ROTATION_SPACE = 3 # clockwise, counterclockwise, none
-    OPEN_SPACE = 2 # open, close
+    OPEN_SPACE = 3 # open, close, none
     ACTION_SPACE = MOVEMENT_SPACE + ROTATION_SPACE + OPEN_SPACE
 
 
@@ -330,6 +330,12 @@ class ManipulationEnv(gym.Env):
             RotateActions.none.value:           0,
             RotateActions.clockwise.value:      1,
             RotateActions.counterclockwise.value: -1
+        }
+
+        self._action_to_opening = {
+            HandActions.none.value: 0,
+            HandActions.open.value: 1,
+            HandActions.close.value: -1
         }
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
@@ -382,7 +388,7 @@ class ManipulationEnv(gym.Env):
         self._elapsed_steps += 1
 
         # Physics
-        self._hand.move(self._action_to_direction[action[0]], self._action_to_rotation[action[1]], action[2] == ClawActions.open.value)
+        self._hand.move(self._action_to_direction[action[0]], self._action_to_rotation[action[1]], self._action_to_opening[action[2]])
         self._space.step(self.PHYSICS_TIMESTEP)
 
         # Check if terminated
