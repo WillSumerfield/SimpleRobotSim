@@ -20,15 +20,14 @@ class BetterExploration(gym.Wrapper):
 
     def reset(self, seed=None, options=None):
         obs, info = self.env.reset(seed=seed, options=options)
+        obs = self.modify_obs(obs)
         self._total_reward = 0
         return obs, info
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
 
-        # Modify the obs to be relative to the agent
-        obs[4:6] = obs[4:6] - obs[:2]
-        obs[7:9] = obs[7:9] - obs[:2]
+        obs = self.modify_obs(obs)
 
         # Use more iterative rewards to enable better exploration
         dist_to_obj = np.linalg.norm(obs[4:6]) / SQ2
@@ -74,3 +73,10 @@ class BetterExploration(gym.Wrapper):
             else:
                 subtask_rewards[type_name] = 0
         return subtask_rewards
+    
+    def modify_obs(self, obs):
+        # Modify the obs to be relative to the agent
+        obs[4:6] = obs[4:6] - obs[:2]
+        obs[7:9] = obs[7:9] - obs[:2]
+
+        return obs
