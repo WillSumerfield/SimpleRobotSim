@@ -10,7 +10,8 @@ import os
 import glob
 
 import Grasper
-from manual_control import key_presses, get_actions, on_press, on_release
+from Grasper.wrappers import BetterExploration
+from key_checks import key_presses, get_actions, on_press, on_release
 
 
 DEMO_FOLDER = "./demos"
@@ -18,6 +19,7 @@ DEMO_FOLDER = "./demos"
 
 def provide_demos(env_name):
     env = gym.make(env_name, render_mode="human")
+    env = BetterExploration(env)
     env.reset()
 
     # Start a separate pynput listener thread
@@ -81,7 +83,6 @@ def provide_demos(env_name):
 def record_demo(env):
     # Run until the env. is completed
     seed = np.random.randint(0, 2**32 - 1)
-    print(seed)
     obs, info = env.reset(seed=seed)
     step = 0
     obs_space = env.unwrapped.observation_space.shape[0]
@@ -99,18 +100,23 @@ def record_demo(env):
             return seed, trajectory, step+1
         
 
-def play_demos(env_name, demo_number):
-    env = gym.make(env_name, render_mode="human")
-
-    # Load the latest demo
-    demo_file = glob.glob(DEMO_FOLDER + "/" + env.spec.id + f"/demo_{demo_number}.npy")
+def load_demos(env_id, demo_number):
+    demo_file = glob.glob(DEMO_FOLDER + "/" + env_id + f"/demo_{demo_number}.npy")
     if not demo_file:
         print("No demo collection found of that number.")
-        return
+        raise FileNotFoundError("No demo collection found of that number.")
     demo_matrix = np.load(demo_file[0])
     demo_seeds_file = demo_file[0].replace("demo_", "demo_seeds_")
     demo_seeds = np.load(demo_seeds_file)
     print(f"Loaded {len(demo_seeds)} demos from {demo_file[0]}")
+    return demo_seeds, demo_matrix
+
+
+def play_demos(env_name, demo_number):
+    env = gym.make(env_name, render_mode="human")
+    env = BetterExploration(env)
+
+    demo_seeds, demo_matrix = load_demos(env_name, demo_number)
 
     # Play the demos
     for seed, demo in zip(demo_seeds, demo_matrix):
