@@ -14,6 +14,7 @@ PI2 = 2*np.pi
 HPI = np.pi/2
 DOME_PRECISION = 12
 
+
 def get_rect_vertices(size):
     return [
         (0, 0),
@@ -57,29 +58,52 @@ class HandActions(Enum):
 
 
 class Hand():
+
+    class Parameters():
+        def __init__(self, segment_lengths: np.ndarray, joint_angles: np.ndarray, rotation_max: float):
+            self.segment_lengths = segment_lengths # TopL, TopR, BottomL, BottomR
+            self.joint_angle = joint_angles # Left, Right
+            self.rotation_max = rotation_max
+
+    DEFAULT_PARAMETERS = Parameters(
+        np.array([48]*4), # Segment lengths
+        np.array([np.pi/4]*2), # Joint angles
+        np.pi * (15/16.0) # Rotation Max
+    )
+
     MOVE_SPEED = 3
     BASE_COLOR = (0, 0, 0)
     SEGMENT_COLOR = (128, 128, 128)
     BASE_RADIUS = 32
     MIN_Y_SPAWN = 256
-    MAX_ANGLE = np.pi * (15/16.0)
     MIN_ANGLE = HPI
-    DIGIT_ANGLE = np.pi/4
     SEGMENT_MASS = 10
-    SEGMENT_SIZE = (8, 48)
-    MIN_POS = np.array([0, FLOOR_Y+SEGMENT_SIZE[1]+BASE_RADIUS])
-    MAX_POS = np.array([WINDOW_SIZE[0], WINDOW_SIZE[1]-1])
+    SEGMENT_WIDTH = 8
     SEGMENT_OFFSET = np.sqrt((BASE_RADIUS**2)/2)
-    SEGMENT_VERTICES = get_rect_vertices(SEGMENT_SIZE)
-    SEGMENT_MOI = pymunk.moment_for_poly(SEGMENT_MASS, [(0,0), (0,SEGMENT_SIZE[1]), (SEGMENT_SIZE[0],SEGMENT_SIZE[1]), (SEGMENT_SIZE[0],0)])
-    SEGMENT_COLLISION_FILTER = pymunk.ShapeFilter(categories=0b100, mask=pymunk.ShapeFilter.ALL_MASKS() ^ 0b100)
+    MAX_POS = np.array([WINDOW_SIZE[0], WINDOW_SIZE[1]-1])
+    SEGMENT_L_COLLISION_FILTER = pymunk.ShapeFilter(categories=0b100, mask=pymunk.ShapeFilter.ALL_MASKS() ^ 0b100)
+    SEGMENT_R_COLLISION_FILTER = pymunk.ShapeFilter(categories=0b1000, mask=pymunk.ShapeFilter.ALL_MASKS() ^ 0b1000)
+    SEGMENT_COLLISION_FILTER = pymunk.ShapeFilter(categories=0b1100, mask=pymunk.ShapeFilter.ALL_MASKS() ^ 0b1100)
     SEGMENT_FRICTION = 0.5
     FORCE = 10000
 
 
-    def __init__(self, space, rng):
+    def __init__(self, space, rng, parameters=None):
         position = ((np.array([WINDOW_SIZE[0], WINDOW_SIZE[1]-self.MIN_Y_SPAWN]) * rng.random(2, dtype=float)) \
                     + np.array([0, self.MIN_Y_SPAWN])).tolist()
+        
+        if parameters is None:
+            parameters = self.DEFAULT_PARAMETERS
+        
+        self.parameters = parameters
+        max_l_length = max(np.cos(self.parameters.joint_angle[0])*self.parameters.segment_lengths[0]+self.parameters.segment_lengths[2],
+                           self.parameters.segment_lengths[0]+np.cos(self.parameters.joint_angle[0])*self.parameters.segment_lengths[2])
+        max_r_length = max(np.cos(self.parameters.joint_angle[1])*self.parameters.segment_lengths[1]+self.parameters.segment_lengths[3],
+                           self.parameters.segment_lengths[1]+np.cos(self.parameters.joint_angle[1])*self.parameters.segment_lengths[3])
+        max_digit_len = max(max_l_length, max_r_length)
+        self.MIN_POS = np.array([0, FLOOR_Y+self.SEGMENT_OFFSET+max_digit_len])
+        self.segment_vertices = [get_rect_vertices((self.SEGMENT_WIDTH, length)) for length in self.parameters.segment_lengths]
+        segment_mois = [pymunk.moment_for_poly(self.SEGMENT_MASS, vertices) for vertices in self.segment_vertices]
         
         # Hinge
         self._hinge = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
@@ -90,55 +114,55 @@ class Hand():
         space.add(self._hinge, self.hinge_shape)
 
         # Digit upper segments
-        self._segment_ul_body = pymunk.Body(self.SEGMENT_MASS, self.SEGMENT_MOI, body_type=pymunk.Body.DYNAMIC)
+        self._segment_ul_body = pymunk.Body(self.SEGMENT_MASS, segment_mois[0], body_type=pymunk.Body.DYNAMIC)
         self._segment_ul_body.position = self._hinge.position + (self.SEGMENT_OFFSET * np.array([-1, -1]))
-        self._segment_ul_body.angle = self.MAX_ANGLE
-        self._segment_ul = pymunk.Poly(self._segment_ul_body, self.SEGMENT_VERTICES)
+        self._segment_ul_body.angle = self.parameters.rotation_max
+        self._segment_ul = pymunk.Poly(self._segment_ul_body, self.segment_vertices[0])
         self._segment_ul.friction = self.SEGMENT_FRICTION
-        self._segment_ul.filter = self.SEGMENT_COLLISION_FILTER
+        self._segment_ul.filter = self.SEGMENT_L_COLLISION_FILTER
         space.add(self._segment_ul_body, self._segment_ul)
-        self._segment_ur_body = pymunk.Body(self.SEGMENT_MASS, self.SEGMENT_MOI, body_type=pymunk.Body.DYNAMIC)
+        self._segment_ur_body = pymunk.Body(self.SEGMENT_MASS, segment_mois[1], body_type=pymunk.Body.DYNAMIC)
         self._segment_ur_body.position = self._hinge.position + (self.SEGMENT_OFFSET * np.array([1, -1]))
-        self._segment_ur_body.angle = -self.MAX_ANGLE
-        self._segment_ur = pymunk.Poly(self._segment_ur_body, self.SEGMENT_VERTICES)
+        self._segment_ur_body.angle = -self.parameters.rotation_max
+        self._segment_ur = pymunk.Poly(self._segment_ur_body, self.segment_vertices[1])
         self._segment_ur.friction = self.SEGMENT_FRICTION
-        self._segment_ur.filter = self.SEGMENT_COLLISION_FILTER
+        self._segment_ur.filter = self.SEGMENT_R_COLLISION_FILTER
         space.add(self._segment_ur_body, self._segment_ur)
 
         # Digit lower segments
-        left_offset = rotate_vertices(np.array([0, self.SEGMENT_SIZE[1]]), self._segment_ul_body.angle)
-        right_offset = rotate_vertices(np.array([0, self.SEGMENT_SIZE[1]]), self._segment_ur_body.angle)
-        self._segment_ll_body = pymunk.Body(self.SEGMENT_MASS, self.SEGMENT_MOI, body_type=pymunk.Body.DYNAMIC)
+        left_offset = rotate_vertices(np.array([0, self.parameters.segment_lengths[0]]), self._segment_ul_body.angle)
+        right_offset = rotate_vertices(np.array([0, self.parameters.segment_lengths[1]]), self._segment_ur_body.angle)
+        self._segment_ll_body = pymunk.Body(self.SEGMENT_MASS, segment_mois[2], body_type=pymunk.Body.DYNAMIC)
         self._segment_ll_body.position = self._segment_ul_body.position + left_offset
-        self._segment_ll_body.angle = self._segment_ul_body.angle + self.DIGIT_ANGLE
-        self._segment_ll = pymunk.Poly(self._segment_ll_body, self.SEGMENT_VERTICES)
+        self._segment_ll_body.angle = self._segment_ul_body.angle + self.parameters.joint_angle[0]
+        self._segment_ll = pymunk.Poly(self._segment_ll_body, self.segment_vertices[2])
         self._segment_ll.friction = self.SEGMENT_FRICTION
-        self._segment_ll.filter = self.SEGMENT_COLLISION_FILTER
+        self._segment_ll.filter = self.SEGMENT_L_COLLISION_FILTER
         space.add(self._segment_ll_body, self._segment_ll)
-        self._segment_lr_body = pymunk.Body(self.SEGMENT_MASS, self.SEGMENT_MOI, body_type=pymunk.Body.DYNAMIC)
+        self._segment_lr_body = pymunk.Body(self.SEGMENT_MASS, segment_mois[3], body_type=pymunk.Body.DYNAMIC)
         self._segment_lr_body.position = self._segment_ur_body.position + right_offset
-        self._segment_lr_body.angle = self._segment_ur_body.angle - self.DIGIT_ANGLE
-        self._segment_lr = pymunk.Poly(self._segment_lr_body, self.SEGMENT_VERTICES)
+        self._segment_lr_body.angle = self._segment_ur_body.angle - self.parameters.joint_angle[1]
+        self._segment_lr = pymunk.Poly(self._segment_lr_body, self.segment_vertices[3])
         self._segment_lr.friction = self.SEGMENT_FRICTION
-        self._segment_lr.filter = self.SEGMENT_COLLISION_FILTER
+        self._segment_lr.filter = self.SEGMENT_R_COLLISION_FILTER
         space.add(self._segment_lr_body, self._segment_lr)
 
         # Pivot joints make the digits rotate around the hinge
-        self._pivot_ul = pymunk.PivotJoint(self._segment_ul_body, self._hinge, (self.SEGMENT_SIZE[0]/2,0), (-self.SEGMENT_OFFSET,-self.SEGMENT_OFFSET))
+        self._pivot_ul = pymunk.PivotJoint(self._segment_ul_body, self._hinge, (self.SEGMENT_WIDTH/2,0), (-self.SEGMENT_OFFSET,-self.SEGMENT_OFFSET))
         self._pivot_ul.error_bias = 0
-        self._pivot_ur = pymunk.PivotJoint(self._segment_ur_body, self._hinge, (self.SEGMENT_SIZE[0]/2,0), (self.SEGMENT_OFFSET,-self.SEGMENT_OFFSET))
+        self._pivot_ur = pymunk.PivotJoint(self._segment_ur_body, self._hinge, (self.SEGMENT_WIDTH/2,0), (self.SEGMENT_OFFSET,-self.SEGMENT_OFFSET))
         self._pivot_ur.error_bias = 0
-        self._pivot_ll = pymunk.PivotJoint(self._segment_ll_body, self._segment_ul_body, (self.SEGMENT_SIZE[0]/2,0), (self.SEGMENT_SIZE[0]/2,self.SEGMENT_SIZE[1]))
+        self._pivot_ll = pymunk.PivotJoint(self._segment_ll_body, self._segment_ul_body, (self.SEGMENT_WIDTH/2,0), (self.SEGMENT_WIDTH/2, self.parameters.segment_lengths[0]))
         self._pivot_ll.error_bias = 0
-        self._pivot_lr = pymunk.PivotJoint(self._segment_lr_body, self._segment_ur_body, (self.SEGMENT_SIZE[0]/2,0), (self.SEGMENT_SIZE[0]/2,self.SEGMENT_SIZE[1]))
+        self._pivot_lr = pymunk.PivotJoint(self._segment_lr_body, self._segment_ur_body, (self.SEGMENT_WIDTH/2,0), (self.SEGMENT_WIDTH/2, self.parameters.segment_lengths[1]))
         self._pivot_lr.error_bias = 0
         space.add(self._pivot_ul, self._pivot_ur, self._pivot_ll, self._pivot_lr)
 
         # Rotary joints limit joints to control the opening and closing of the digits
-        self._limit_ul = pymunk.RotaryLimitJoint(self._hinge, self._segment_ul_body, self.MIN_ANGLE, self.MAX_ANGLE)
-        self._limit_ur = pymunk.RotaryLimitJoint(self._hinge, self._segment_ur_body, -self.MAX_ANGLE, -self.MIN_ANGLE)
-        self._limit_ll = pymunk.RotaryLimitJoint(self._segment_ll_body, self._segment_ul_body, -self.DIGIT_ANGLE, -self.DIGIT_ANGLE)
-        self._limit_lr = pymunk.RotaryLimitJoint(self._segment_lr_body, self._segment_ur_body, self.DIGIT_ANGLE, self.DIGIT_ANGLE)
+        self._limit_ul = pymunk.RotaryLimitJoint(self._hinge, self._segment_ul_body, self.MIN_ANGLE, self.parameters.rotation_max)
+        self._limit_ur = pymunk.RotaryLimitJoint(self._hinge, self._segment_ur_body, -self.parameters.rotation_max, -self.MIN_ANGLE)
+        self._limit_ll = pymunk.RotaryLimitJoint(self._segment_ll_body, self._segment_ul_body, -self.parameters.joint_angle[0], -self.parameters.joint_angle[0])
+        self._limit_lr = pymunk.RotaryLimitJoint(self._segment_lr_body, self._segment_ur_body, self.parameters.joint_angle[1], self.parameters.joint_angle[1])
         space.add(self._limit_ul, self._limit_ur, self._limit_ll, self._limit_lr)
 
     def move(self, direction, rotation, open_hand):
@@ -147,12 +171,11 @@ class Hand():
 
         # Apply force to the digits
         force = self.FORCE * open_hand
-        force_direction_l = np.array([np.cos(self._segment_ul_body.angle), np.sin(self._segment_ul_body.angle)]) * force
-        force_direction_r = force_direction_l * np.array([-1, 1])
-        force_position_l = rotate_vertices(np.array([self.SEGMENT_SIZE[0]/2, self.SEGMENT_SIZE[1]]), self._segment_ul_body.angle)
-        force_position_r = force_position_l * np.array([-1, 1])
-        self._segment_ul_body.apply_force_at_local_point(force_direction_l.tolist(), force_position_l.tolist())
-        self._segment_ur_body.apply_force_at_local_point(force_direction_r.tolist(), force_position_r.tolist())
+        force_direction_l = [force, 0]
+        force_direction_r = [-force, 0]
+        force_position = [self.SEGMENT_WIDTH/2, self.parameters.segment_lengths[0]]
+        self._segment_ul_body.apply_force_at_local_point(force_direction_l, force_position)
+        self._segment_ur_body.apply_force_at_local_point(force_direction_r, force_position)
 
     def get_state(self):
         return np.array([self._hinge.position[0]/WINDOW_SIZE[0], 
@@ -167,16 +190,16 @@ class Hand():
                            self.BASE_RADIUS)
         pygame.draw.polygon(canvas,
                             self.SEGMENT_COLOR,
-                            np.array([self._segment_ul_body.position]) + rotate_vertices(self.SEGMENT_VERTICES, self._segment_ul_body.angle))
+                            np.array([self._segment_ul_body.position]) + rotate_vertices(self.segment_vertices[0], self._segment_ul_body.angle))
         pygame.draw.polygon(canvas,
                             self.SEGMENT_COLOR,
-                            np.array([self._segment_ur_body.position]) + rotate_vertices(self.SEGMENT_VERTICES, self._segment_ur_body.angle))
+                            np.array([self._segment_ur_body.position]) + rotate_vertices(self.segment_vertices[1], self._segment_ur_body.angle))
         pygame.draw.polygon(canvas,
                             self.SEGMENT_COLOR,
-                            np.array([self._segment_ll_body.position]) + rotate_vertices(self.SEGMENT_VERTICES, self._segment_ll_body.angle))
+                            np.array([self._segment_ll_body.position]) + rotate_vertices(self.segment_vertices[2], self._segment_ll_body.angle))
         pygame.draw.polygon(canvas,
                             self.SEGMENT_COLOR,
-                            np.array([self._segment_lr_body.position]) + rotate_vertices(self.SEGMENT_VERTICES, self._segment_lr_body.angle))
+                            np.array([self._segment_lr_body.position]) + rotate_vertices(self.segment_vertices[3], self._segment_lr_body.angle))
 
 class Floor():
     def __init__(self, space):
@@ -360,6 +383,11 @@ class ManipulationEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
+        # Get options
+        if options is None:
+            options = {}
+        hand_parameters = options.get("hand_parameters", None)
+
         self._elapsed_steps = 0
 
         self._space = pymunk.Space()
@@ -368,7 +396,7 @@ class ManipulationEnv(gym.Env):
 
         # Add the objects to the physical space
         self._floor = Floor(self._space)
-        self._hand = Hand(self._space, self.np_random)
+        self._hand = Hand(self._space, self.np_random, parameters=hand_parameters)
         self._object = Object(self._space, self.np_random)
 
         self._target_position = np.array([((WINDOW_SIZE[0] - 2*self._object.SIZE)*self.np_random.random(dtype=float)) + self._object.SIZE, 

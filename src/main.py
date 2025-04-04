@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--agent-save-file", type=str, help="File to save or load the agent", default="agent.pkl")
     parser.add_argument("--demo-index", type=int, help="The demo index to train the baseline on.", default=1)
     parser.add_argument("--replay", type=int, help="Playback the provided demo collection number.")
+    parser.add_argument("--hand-type", type=int, help="The index of the pre-defined hand to use. Claw default.", default=0)
     args = parser.parse_args()
 
     if args.env == "manipulation":
