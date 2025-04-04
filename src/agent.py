@@ -102,7 +102,6 @@ class DAPG(PPO):
                 pi_features, vf_features = features
                 latent_pi = self.mlp_extractor.forward_actor(pi_features)
                 latent_vf = self.mlp_extractor.forward_critic(vf_features)
-            mean_actions = self.action_net(latent_pi)
             distribution = self._get_action_dist_from_latent(latent_pi)
             log_prob = distribution.log_prob(actions)
             values = self.value_net(latent_vf)
@@ -121,7 +120,7 @@ class DAPG(PPO):
         for param in self.baseline_policy.parameters():
             param.requires_grad = False
 
-        self.lambda_bc_init = 100
+        self.lambda_bc_init = 10
         self.lambda_bc_decay = 0.99
 
 
