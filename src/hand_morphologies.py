@@ -18,13 +18,13 @@ HAND_TYPES = [
     ),
     # Short Elbows
     Hand.Parameters(
-        np.array([64, 64, 48, 48]), # Segment lengths
+        np.array([64, 64, 64, 64]), # Segment lengths
         np.array([np.pi * (3/4.0)]*2), # Joint angles
         np.pi * (3/4.0) # Rotation Max
     ),
     # Long Elbows
     Hand.Parameters(
-        np.array([64, 64, 32, 32]), # Segment lengths
+        np.array([96, 96, 80, 80]), # Segment lengths
         np.array([np.pi * (3/4.0)]*2), # Joint angles
         np.pi * (3/4.0) # Rotation Max
     ),
