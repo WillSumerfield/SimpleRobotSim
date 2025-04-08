@@ -85,7 +85,7 @@ class Hand():
     SEGMENT_R_COLLISION_FILTER = pymunk.ShapeFilter(categories=0b1000, mask=pymunk.ShapeFilter.ALL_MASKS() ^ 0b1000)
     SEGMENT_COLLISION_FILTER = pymunk.ShapeFilter(categories=0b1100, mask=pymunk.ShapeFilter.ALL_MASKS() ^ 0b1100)
     SEGMENT_FRICTION = 0.5
-    FORCE = 10000
+    FORCE = 20000
 
 
     def __init__(self, space, rng, parameters=None):
@@ -100,8 +100,8 @@ class Hand():
                            self.parameters.segment_lengths[0]+np.cos(self.parameters.joint_angle[0])*self.parameters.segment_lengths[2])
         max_r_length = max(np.cos(self.parameters.joint_angle[1])*self.parameters.segment_lengths[1]+self.parameters.segment_lengths[3],
                            self.parameters.segment_lengths[1]+np.cos(self.parameters.joint_angle[1])*self.parameters.segment_lengths[3])
-        max_digit_len = max(max_l_length, max_r_length)
-        self.MIN_POS = np.array([0, FLOOR_Y+self.SEGMENT_OFFSET+max_digit_len])
+        self.max_digit_len = max(max_l_length, max_r_length)
+        self.MIN_POS = np.array([0, FLOOR_Y+self.SEGMENT_OFFSET+self.max_digit_len])
         self.segment_vertices = [get_rect_vertices((self.SEGMENT_WIDTH, length)) for length in self.parameters.segment_lengths]
         segment_mois = [pymunk.moment_for_poly(self.SEGMENT_MASS, vertices) for vertices in self.segment_vertices]
         
@@ -238,21 +238,24 @@ class Object():
     CROSS_MOI = 2*pymunk.moment_for_box(MASS/2, (SIZE, CROSS_WIDTH))
 
 
-    def __init__(self, space, rng):
+    def __init__(self, space, rng, obj_type):
         # Setup the object
-        self._type = rng.choice(list(self.ObjectTypes))
+        if obj_type is None:
+            self._type = rng.choice(list(self.ObjectTypes)).value
+        else:
+            self._type = obj_type
         self._type_vec = np.zeros(len(self.ObjectTypes), dtype=float)
-        self._type_vec[self._type.value] = 1
-        if self._type == self.ObjectTypes.circle:
+        self._type_vec[self._type] = 1
+        if self._type == self.ObjectTypes.circle.value:
             self._body = pymunk.Body(1, self.CIRCLE_MOI, body_type=pymunk.Body.DYNAMIC)
             self._shape = pymunk.Circle(self._body, self.SIZE/2)
-        elif self._type == self.ObjectTypes.square:
+        elif self._type == self.ObjectTypes.square.value:
             self._body = pymunk.Body(1, self.SQUARE_MOI, body_type=pymunk.Body.DYNAMIC)
             self._shape = pymunk.Poly.create_box(self._body, (self.SIZE, self.SIZE))
-        elif self._type == self.ObjectTypes.dome:
+        elif self._type == self.ObjectTypes.dome.value:
             self._body = pymunk.Body(1, self.CROSS_MOI, body_type=pymunk.Body.DYNAMIC)
             self._shape = pymunk.Poly(self._body, self.DOME_VERTICES)
-        elif self._type == self.ObjectTypes.sheet:
+        elif self._type == self.ObjectTypes.sheet.value:
             self._body = pymunk.Body(1, self.SHEET_MOI, body_type=pymunk.Body.DYNAMIC)
             self._shape = pymunk.Poly.create_box(self._body, (self.SIZE*2, self.SHEET_HEIGHT))
         else: # Cross
@@ -268,7 +271,7 @@ class Object():
         self._shape.friction = self.FRICTION
         self._shape.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
 
-        if self._type == self.ObjectTypes.cross:
+        if self._type == self.ObjectTypes.cross.value:
             space.add(self._body, self._shape, self._shape2)
         else:
             space.add(self._body, self._shape)
@@ -282,21 +285,21 @@ class Object():
         return self._type_vec
     
     def draw(self, canvas):
-        if self._type == self.ObjectTypes.circle:
+        if self._type == self.ObjectTypes.circle.value:
             pygame.draw.circle(canvas,
                                self.COLOR,
                                self._body.position,
                                self.SIZE/2)
-        elif self._type == self.ObjectTypes.square:
+        elif self._type == self.ObjectTypes.square.value:
             pygame.draw.polygon(canvas,
                                 self.COLOR,
                                 np.array([self._body.position]) +
                                 rotate_vertices(np.array(get_rect_vertices((self.SIZE, self.SIZE)) - np.array([self.SIZE/2, self.SIZE/2])), self._body.angle))
-        elif self._type == self.ObjectTypes.dome:
+        elif self._type == self.ObjectTypes.dome.value:
             pygame.draw.polygon(canvas,
                                 self.COLOR,
                                 np.array([self._body.position]) + rotate_vertices(self.DOME_VERTICES, self._body.angle))
-        elif self._type == self.ObjectTypes.sheet:
+        elif self._type == self.ObjectTypes.sheet.value:
             pygame.draw.polygon(canvas,
                                 self.COLOR,
                                 np.array([self._body.position]) + 
@@ -334,6 +337,7 @@ class ManipulationEnv(gym.Env):
 
     def __init__(self, render_mode=None):
         super().__init__()
+        self._render_flip = True
         
         # What the agent sees
         self.observation_space = spaces.Box(-1, 1, shape=(self.OBS_SPACE,), dtype=float)
@@ -387,6 +391,7 @@ class ManipulationEnv(gym.Env):
         if options is None:
             options = {}
         hand_parameters = options.get("hand_parameters", None)
+        object_type = options.get("object_type", None)
 
         self._elapsed_steps = 0
 
@@ -397,7 +402,7 @@ class ManipulationEnv(gym.Env):
         # Add the objects to the physical space
         self._floor = Floor(self._space)
         self._hand = Hand(self._space, self.np_random, parameters=hand_parameters)
-        self._object = Object(self._space, self.np_random)
+        self._object = Object(self._space, self.np_random, obj_type=object_type)
 
         self._target_position = np.array([((WINDOW_SIZE[0] - 2*self._object.SIZE)*self.np_random.random(dtype=float)) + self._object.SIZE, 
                                           ((WINDOW_SIZE[1] - 2*self._object.SIZE - self._hand.MIN_Y_SPAWN - self.TARGET_Y_BUFFER)*self.np_random.random(dtype=float)) + 
@@ -462,9 +467,10 @@ class ManipulationEnv(gym.Env):
         inv_canvas = pygame.transform.flip(canvas, False, True) # Invert Y
         if self.render_mode == "human":
             self.window.blit(inv_canvas, inv_canvas.get_rect())
-            pygame.event.pump()
-            pygame.display.update()
-            self.clock.tick(self.metadata["render_fps"])
+            if self._render_flip:
+                pygame.event.pump()
+                pygame.display.update()
+                self.clock.tick(self.metadata["render_fps"])
         else:  # rgb_array
             return np.transpose(
                 np.array(pygame.surfarray.pixels3d(inv_canvas)), axes=(1, 0, 2)

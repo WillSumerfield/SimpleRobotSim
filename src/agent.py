@@ -6,6 +6,7 @@ import os
 import glob
 import logging
 from typing import Optional
+from itertools import product
 
 import numpy as np
 import torch
@@ -22,33 +23,36 @@ from stable_baselines3.common.callbacks import BaseCallback, StopTrainingOnRewar
 from stable_baselines3.common.utils import explained_variance
 from stable_baselines3.common.type_aliases import PyTorchObs
 from stable_baselines3.common.policies import ActorCriticPolicy
-from stable_baselines3.common.distributions import MultiCategoricalDistribution
 
-
-from Grasper.wrappers import BetterExploration
+from Grasper.wrappers import BetterExploration, HandParams
 from baseline import load_baseline
 
 
-ENTROPY = 0.1
+CPU_COUNT = os.cpu_count()-4
 CHECKPOINTS_FOLDER = "./checkpoints"
 CHECKPOINT_NAME = "ppo_grasper"
 VIDEOS_FOLDER = "./videos"
 LOGS_FOLDER = "./training_logs"
-PPO_ARGS = { "verbose": 1, "device": "cpu", "ent_coef": ENTROPY, "tensorboard_log": LOGS_FOLDER}
+MODEL_FOLDER = "./models"
+POLICY_ARGS = {"net_arch": [128, 64], "activation_fn": torch.nn.ReLU}
+PPO_ARGS = {"learning_rate": 1e-4, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
+            "ent_coef": 0.05, "gamma": 0.98}
+PARAM_DICT = {"learning_rate": [3e-4, 1e-4], "n_steps": [512, 1024]}
 
 
-def _make_env(env_id, record=False):
+def _make_env(env_id, hand_type, record=False):
     if not record:
         env = gym.make(env_id)
     else:
         env = gym.make(env_id, render_mode="rgb_array")
     env = BetterExploration(env)
+    env = HandParams(env, hand_type)
     env = gym.wrappers.FlattenObservation(env)
     env = Monitor(env)
     if not record:
         check_env(env)
     else:
-        env = gym.wrappers.RecordVideo(env, video_folder=VIDEOS_FOLDER, episode_trigger=lambda x: True, disable_logger=True)
+        env = gym.wrappers.RecordVideo(env, video_folder=f"{VIDEOS_FOLDER}/hand_type_{hand_type}", episode_trigger=lambda x: True, disable_logger=True)
     return env
 
 
@@ -115,14 +119,13 @@ class DAPG(PPO):
         if "policy" not in kwargs:
             args["policy"] = self.CustomActorCriticPolicy
         super().__init__(**{**args, **kwargs})
-        self.baseline_policy = load_baseline(self.observation_space.shape[0], self.action_space.nvec.tolist())
+        self.baseline_policy = load_baseline(self.observation_space.shape[0], self.action_space.nvec.tolist(), device=self.device, verbose=self.verbose)
         self.baseline_policy.eval()
         for param in self.baseline_policy.parameters():
             param.requires_grad = False
 
-        self.lambda_bc_init = 10
+        self.lambda_bc_init = 0
         self.lambda_bc_decay = 0.99
-
 
     # Modified PPO class to include Behavior Cloning
     def train(self) -> None:
@@ -254,61 +257,72 @@ class DAPG(PPO):
         self.logger.record("train/bc_loss", bc_loss.item()*lambda_bc)
 
 
-def train_agent(env_id, continue_training=False, total_timesteps=1e8):
-    envs = make_vec_env(lambda: _make_env(env_id), n_envs=os.cpu_count()-4, vec_env_cls=SubprocVecEnv)
+def train_agent(env_id, hand_type, continue_training=False, total_timesteps=1e8, param_dict=dict(), verbose=1, provided_envs=None):
+    if provided_envs is None:
+        envs = make_vec_env(lambda: _make_env(env_id, hand_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
+    else:
+        envs = provided_envs
+
+    checkpoint_folder = f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}"
 
     # Callback Functions
-    rew_callback = StopTrainingOnRewardThreshold(reward_threshold=1000, verbose=0)
+    rew_callback = StopTrainingOnRewardThreshold(reward_threshold=1100, verbose=verbose)
     eval_callback = EvalCallback(
         envs, 
         callback_on_new_best=rew_callback,  # Check stopping condition when new best reward is reached
         eval_freq=2e4,
         n_eval_episodes=25,
-        deterministic=True
+        deterministic=True,
+        verbose=verbose
     )
-    checkpoint_callback = CheckpointCallback(save_freq=1e4, save_path=CHECKPOINTS_FOLDER, name_prefix=CHECKPOINT_NAME)
-    subtask_reward_callback = SubtaskRewardLogger(envs)
+    checkpoint_callback = CheckpointCallback(save_freq=1e4, save_path=checkpoint_folder, name_prefix=CHECKPOINT_NAME, verbose=verbose)
+    subtask_reward_callback = SubtaskRewardLogger(envs, verbose=verbose)
+
+    tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}"
     
     # Load or create model
     if continue_training:
-        checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/{CHECKPOINT_NAME}_*.zip")
+        checkpoint_files = glob.glob(f"{checkpoint_folder}/{CHECKPOINT_NAME}_*.zip")
         if not checkpoint_files:
             raise FileNotFoundError("No saved model or checkpoints found.")
         latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
-        model = DAPG.load(path=latest_checkpoint, env=envs)
+        ppo_args = PPO_ARGS.copy()
+        ppo_args["verbose"] = verbose
+        ppo_args["tensorboard_log"] = tensorboard_log
+        print(f"Loading model from {latest_checkpoint}.")
+        model = DAPG.load(path=latest_checkpoint, env=envs, **ppo_args, kwargs=param_dict)
     else:
-        model = DAPG(env=envs)
+        model = DAPG(env=envs, **param_dict, verbose=verbose, tensorboard_log=tensorboard_log)
 
     # Train model
     model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, eval_callback, subtask_reward_callback])
-    model.save(CHECKPOINT_NAME)
+    model.save(f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}")
+    return model
 
 
-def test_agent(env_id, n_eval_episodes=25, n_displayed_episodes=5):
+def test_agent(env_id, hand_type, n_eval_episodes=250, n_displayed_episodes=5):
     # Find latest checkpoint
-    model_path = f"{CHECKPOINT_NAME}.zip"
-    if not os.path.exists(model_path):
-        # Find the latest checkpoint
-        checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/{CHECKPOINT_NAME}_*.zip")
-        if not checkpoint_files:
-            raise FileNotFoundError("No saved model or checkpoints found.")
-        latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
-        model_path = latest_checkpoint
+    checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}_*.zip")
+    if not checkpoint_files:
+        raise FileNotFoundError("No saved model or checkpoints found.")
+    latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
+
+    env = make_vec_env(lambda: _make_env(env_id, hand_type), n_envs=1, vec_env_cls=DummyVecEnv)
 
     # Load model
-    print(f"Loading model from {model_path}")
-    model = DAPG.load(policy=latest_checkpoint)
+    print(f"Loading model from {latest_checkpoint}")
+    model = DAPG.load(env=env, path=latest_checkpoint, **PPO_ARGS, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
 
     # Evaluate model
-    env = make_vec_env(lambda: _make_env(env_id), n_envs=1, vec_env_cls=DummyVecEnv)
     mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=n_eval_episodes, deterministic=True)
     print(f"Mean reward: {mean_reward} +/- {std_reward}")
 
     # Render the environment
     gym.logger.min_level = logging.ERROR
-    env = _make_env(env_id, record=True)
+    env = _make_env(env_id, hand_type, record=True)
     episodes = 1
-    obs, info = env.reset()
+    obj_type = 0
+    obs, info = env.reset(options={"object_type": obj_type})
     while True:
         action, _states = model.predict(obs, deterministic=True)
         obs, reward, done, terminated, info = env.step(action)
@@ -316,7 +330,36 @@ def test_agent(env_id, n_eval_episodes=25, n_displayed_episodes=5):
         if done or terminated:
             if episodes >= n_displayed_episodes:
                 break
-            obs, info = env.reset()
+            obj_type += 1
+            obs, info = env.reset(options={"object_type": obj_type})
             episodes += 1
     env.close()
     print(f"Video saved to {VIDEOS_FOLDER} folder.")
+
+
+def param_sweep(env_id, hand_type, param_dict=None, timesteps_per_param=1e6):
+    envs = make_vec_env(lambda: _make_env(env_id, hand_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
+    if param_dict is None:
+        param_dict = PARAM_DICT
+    param_combinations = get_param_combinations(param_dict)
+    best_performance = -float("inf")
+    best_params = None
+    for idx, params in enumerate(param_combinations):
+        print(f"{idx+1}/{len(param_combinations)} Training with {params}", end="")
+        model = train_agent(env_id, hand_type, total_timesteps=timesteps_per_param, param_dict=params, verbose=0, provided_envs=envs)
+        env = make_vec_env(lambda: _make_env(env_id, hand_type), n_envs=1, vec_env_cls=DummyVecEnv)
+        mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=25, deterministic=True)
+        del model
+        if mean_reward > best_performance:
+            best_performance = mean_reward
+            best_params = params
+        print(f" - Achieved {mean_reward}.")
+    print(f"Best performance {best_performance} found using {best_params}!")
+
+
+def get_param_combinations(param_dict):
+    param_names = list(param_dict.keys())
+    param_values = [param_dict[name] for name in param_names]
+    value_combinations = list(product(*param_values))
+    param_combinations = [dict(zip(param_names, values)) for values in value_combinations]
+    return param_combinations

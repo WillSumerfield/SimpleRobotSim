@@ -78,16 +78,18 @@ def _make_env(env_id, record=False):
     return env
 
 
-def load_baseline(obs_space, action_space):
+def load_baseline(obs_space, action_space, device, verbose=True):
     # Load the baseline model
     model_path = f"{BASELINE_NAME}.pth"
     if not os.path.exists(model_path):
         raise FileNotFoundError("No saved model or checkpoints found.")
 
     # Load model
-    print(f"Loading model from {model_path}")
+    if verbose:
+        print(f"Loading baseline from {model_path}")
     model = BaselineModel(obs_space, action_space)
     model.load_state_dict(torch.load(model_path))
+    model.to(device)
     model.eval()
     
     return model
