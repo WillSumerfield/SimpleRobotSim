@@ -379,7 +379,7 @@ class ManipulationEnv(gym.Env):
         self.clock = None
 
     def _get_obs(self):
-        return np.concat((self._hand.get_state(), self._object.get_state(), self._obs_target_position, self._object.get_type()), dtype=float)
+        return np.concat((self._object.get_type(), self._hand.get_state(), self._object.get_state(), self._obs_target_position), dtype=float)
     
     def _get_info(self):
         return {}

@@ -5,14 +5,15 @@ My implementation of a PPO agent trained on the Grasper environment.
 import os
 import glob
 import logging
-from typing import Optional
+from typing import Optional, Callable
 from itertools import product
+from functools import partial
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 import gymnasium as gym
-import gymnasium.spaces as spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
@@ -23,6 +24,7 @@ from stable_baselines3.common.callbacks import BaseCallback, StopTrainingOnRewar
 from stable_baselines3.common.utils import explained_variance
 from stable_baselines3.common.type_aliases import PyTorchObs
 from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.distributions import Distribution
 
 from Grasper.wrappers import BetterExploration, HandParams
 from baseline import load_baseline
@@ -34,7 +36,7 @@ CHECKPOINT_NAME = "ppo_grasper"
 VIDEOS_FOLDER = "./videos"
 LOGS_FOLDER = "./training_logs"
 MODEL_FOLDER = "./models"
-POLICY_ARGS = {"net_arch": [128, 64], "activation_fn": torch.nn.ReLU}
+POLICY_ARGS = {"net_arch": [64, 64], "activation_fn": torch.nn.ReLU}
 PPO_ARGS = {"learning_rate": 1e-4, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
             "ent_coef": 0.05, "gamma": 0.98}
 PARAM_DICT = {"learning_rate": [3e-4, 1e-4], "n_steps": [512, 1024]}
@@ -94,30 +96,194 @@ class SubtaskRewardLogger(BaseCallback):
         pass
 
 
+class PopArt(nn.Module):
+    def __init__(self, input_dim, beta=0.99, epsilon=1e-5):
+        """
+        Initializes a PopArt layer.
+        
+        Args:
+            input_dim (int): Dimension of the input from the encoder.
+            beta (float): EMA decay factor.
+            epsilon (float): Small value to ensure numerical stability.
+        """
+        super().__init__()
+        self.beta = beta
+        self.epsilon = epsilon
+        
+        # Instead of using nn.Parameter (with gradients disabled),
+        # we register these as buffers so they move with the model.
+        self.register_buffer('mu', torch.tensor(0.0))
+        self.register_buffer('sigma', torch.tensor(1.0))
+        self.register_buffer('mean_square', torch.tensor(1.0))
+        
+        # The final linear layer predicts a normalized value.
+        self.linear = nn.Linear(input_dim, 1)
+    
+    def forward(self, x):
+        """
+        Returns the unnormalized value by scaling the normalized prediction.
+        """
+        # The network outputs a normalized value. We then rescale it using the current sigma and mu.
+        return self.sigma * self.linear(x) + self.mu
+
+    def update(self, targets):
+        """
+        Updates the running estimates for mu and sigma using an exponential moving average.
+        It then adjusts the weights of the linear layer so that the unnormalized output remains unchanged.
+        
+        Args:
+            targets (Tensor): The target returns as a 1D tensor.
+        """
+        with torch.no_grad():
+            # Save the old values for the adjustment.
+            old_mu = self.mu.clone()
+            old_sigma = self.sigma.clone()
+            
+            # Compute statistics from the batch of target returns.
+            batch_mean = targets.mean()
+            batch_mean_sq = (targets**2).mean()
+            
+            # Update running averages with EMA.
+            new_mean = self.beta * self.mu + (1 - self.beta) * batch_mean
+            new_mean_sq = self.beta * self.mean_square + (1 - self.beta) * batch_mean_sq
+            new_sigma = torch.sqrt(new_mean_sq - new_mean**2 + self.epsilon)
+            
+            # Update buffers.
+            self.mu.copy_(new_mean)
+            self.mean_square.copy_(new_mean_sq)
+            self.sigma.copy_(new_sigma)
+            
+            # Adjust the output layer's parameters to preserve the unnormalized value.
+            # Let f(x) = W*x + b, and our value prediction is V(x)=sigma*f(x) + mu.
+            # When mu and sigma change, we update:
+            #   W' = (old_sigma / new_sigma) * W
+            #   b' = (old_sigma * b + old_mu - new_mean) / new_sigma
+            self.linear.weight.data.mul_(old_sigma / new_sigma)
+            self.linear.bias.data.mul_(old_sigma / new_sigma)
+            self.linear.bias.data.add_((old_mu - new_mean) / new_sigma)
+
+
+class MultiTaskMlpPolicy(ActorCriticPolicy):
+
+    def __init__(self, *args, **kwargs):
+        self.task_count = kwargs.pop("task_count", 1)
+        super().__init__(*args, **kwargs)
+
+    def _build(self, lr_schedule: Callable[[float], float]) -> None:
+        self._build_mlp_extractor()
+
+        latent_dim_pi = self.mlp_extractor.latent_dim_pi
+        self.action_nets = nn.ModuleList([self.action_dist.proba_distribution_net(latent_dim=latent_dim_pi) for _ in range(self.task_count)])
+        self.value_nets = nn.ModuleList([PopArt(self.mlp_extractor.latent_dim_vf) for _ in range(self.task_count)])
+
+        # Init weights: use orthogonal initialization with small initial weight for the output
+        if self.ortho_init:
+            module_gains = {
+                self.features_extractor: np.sqrt(2),
+                self.mlp_extractor: np.sqrt(2),
+                "action_nets": (self.action_nets, 0.01),
+                "value_nets": (self.value_nets, 1),
+            }
+            if not self.share_features_extractor:
+                del module_gains[self.features_extractor]
+                module_gains[self.pi_features_extractor] = np.sqrt(2)
+                module_gains[self.vf_features_extractor] = np.sqrt(2)
+
+            for module, gain in module_gains.items():
+                if isinstance(module, str):
+                    for sub_module in gain[0]:
+                        sub_module.apply(partial(self.init_weights, gain=gain[1]))
+                else:
+                    module.apply(partial(self.init_weights, gain=gain))
+
+        # Setup optimizer with initial learning rate
+        self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
+
+    def _get_task_id(self, obs: PyTorchObs) -> int:
+        return obs[:, 0:self.task_count].argmax(dim=1)
+
+    def _get_action_dist_from_latent(self, task_id: int, latent_pi: torch.Tensor) -> Distribution:
+        mean_actions = self.action_nets[task_id](latent_pi)
+        return self.action_dist.proba_distribution(action_logits=mean_actions)
+
+    def forward(self, obs: torch.Tensor, deterministic: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Preprocess the observation if needed
+        features = self.extract_features(obs)
+        if self.share_features_extractor:
+            latent_pi, latent_vf = self.mlp_extractor(features)
+        else:
+            pi_features, vf_features = features
+            latent_pi = self.mlp_extractor.forward_actor(pi_features)
+            latent_vf = self.mlp_extractor.forward_critic(vf_features)
+
+        # Evaluate the values for the given observations
+        task_ids = self._get_task_id(obs)
+        actions = torch.empty((obs.shape[0], self.action_space.nvec.shape[0]), dtype=torch.int64, device=obs.device)
+        values = torch.empty(obs.shape[0], dtype=torch.float32, device=obs.device)
+        log_prob = torch.empty(obs.shape[0], dtype=torch.float32, device=obs.device)
+        for task_id in range(self.task_count):
+            task_indices = (task_ids == task_id).nonzero(as_tuple=True)[0]
+            if len(task_indices) == 0:
+                continue
+            distribution = self._get_action_dist_from_latent(task_id, latent_pi[task_indices])
+            actions[task_indices] = distribution.get_actions(deterministic=deterministic)
+            values[task_indices] = self.value_nets[task_id](latent_vf[task_indices]).flatten()
+            log_prob[task_indices] = distribution.log_prob(actions[task_indices])
+        
+        actions = actions.reshape((-1, *self.action_space.shape))  # type: ignore[misc]
+        return actions, values, log_prob
+
+    def evaluate_actions(self, task_id: int, obs: PyTorchObs, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        # Preprocess the observation if needed
+        features = self.extract_features(obs)
+        if self.share_features_extractor:
+            latent_pi, latent_vf = self.mlp_extractor(features)
+        else:
+            pi_features, vf_features = features
+            latent_pi = self.mlp_extractor.forward_actor(pi_features)
+            latent_vf = self.mlp_extractor.forward_critic(vf_features)
+        distribution = self._get_action_dist_from_latent(task_id, latent_pi)
+        log_prob = distribution.log_prob(actions)
+        values = self.value_nets[task_id](latent_vf)
+        entropy = distribution.entropy()
+        logits = torch.cat([dist.probs for dist in distribution.distribution], dim=1)
+        return values, log_prob, entropy, logits
+    
+    def get_distribution(self, obs: PyTorchObs) -> Distribution:
+        features = super().extract_features(obs, self.pi_features_extractor)
+        latent_pi = self.mlp_extractor.forward_actor(features)
+        task_ids = self._get_task_id(obs)
+        logits = [torch.empty((obs.shape[0], space), dtype=torch.float32, device=obs.device) for space in self.action_space.nvec]
+        for task_id in range(self.task_count):
+            task_indices = (task_ids == task_id).nonzero(as_tuple=True)[0]
+            if len(task_indices) == 0:
+                continue
+            dist = self._get_action_dist_from_latent(task_id, latent_pi[task_indices])
+            for i in range(self.action_space.nvec.shape[0]):
+                logits[i][task_indices] = dist.distribution[i].logits
+        # Combine the distributions for all tasks
+        dists = self.action_dist.proba_distribution(action_logits=torch.cat(logits, dim=1))
+        return dists
+
+    def predict_values(self, obs: PyTorchObs) -> torch.Tensor:
+        features = super().extract_features(obs, self.vf_features_extractor)
+        latent_vf = self.mlp_extractor.forward_critic(features)
+        task_ids = self._get_task_id(obs)
+        values = torch.empty(obs.shape[0], dtype=torch.float32, device=obs.device)
+        for task_id in range(self.task_count):
+            task_indices = (task_ids == task_id).nonzero(as_tuple=True)[0]
+            if len(task_indices) == 0:
+                continue
+            values[task_indices] = self.value_nets[task_id](latent_vf[task_indices]).flatten()
+        return values
+
+
 class DAPG(PPO):
-
-    class CustomActorCriticPolicy(ActorCriticPolicy):
-        def evaluate_actions(self, obs: PyTorchObs, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-            # Preprocess the observation if needed
-            features = self.extract_features(obs)
-            if self.share_features_extractor:
-                latent_pi, latent_vf = self.mlp_extractor(features)
-            else:
-                pi_features, vf_features = features
-                latent_pi = self.mlp_extractor.forward_actor(pi_features)
-                latent_vf = self.mlp_extractor.forward_critic(vf_features)
-            distribution = self._get_action_dist_from_latent(latent_pi)
-            log_prob = distribution.log_prob(actions)
-            values = self.value_net(latent_vf)
-            entropy = distribution.entropy()
-            logits = torch.cat([dist.probs for dist in distribution.distribution], dim=1)
-            return values, log_prob, entropy, logits
-
-
     def __init__(self, **kwargs):
         args = {key: value for key, value in PPO_ARGS.items() if key not in kwargs}
         if "policy" not in kwargs:
-            args["policy"] = self.CustomActorCriticPolicy
+            args["policy"] = MultiTaskMlpPolicy
+        args["policy_kwargs"]["task_count"] = kwargs["env"].get_attr("OBJECT_TYPES")[0]
         super().__init__(**{**args, **kwargs})
         self.baseline_policy = load_baseline(self.observation_space.shape[0], self.action_space.nvec.tolist(), device=self.device, verbose=self.verbose)
         self.baseline_policy.eval()
@@ -126,6 +292,11 @@ class DAPG(PPO):
 
         self.lambda_bc_init = 0
         self.lambda_bc_decay = 0.99
+
+        self.task_count = self.env.get_attr("OBJECT_TYPES")[0]
+
+    def _get_task_id(self, obs: PyTorchObs) -> int:
+        return obs[:, 0:self.task_count].argmax(dim=1)
 
     # Modified PPO class to include Behavior Cloning
     def train(self) -> None:
@@ -149,87 +320,93 @@ class DAPG(PPO):
             approx_kl_divs = []
             # Do a complete pass on the rollout buffer
             for rollout_data in self.rollout_buffer.get(self.batch_size):
-                actions = rollout_data.actions
-                if isinstance(self.action_space, spaces.Discrete):
-                    # Convert discrete action from float to long
-                    actions = rollout_data.actions.long().flatten()
+                actions = rollout_data.actions#.long().flatten()
 
-                values, log_prob, entropy, logits = self.policy.evaluate_actions(rollout_data.observations, actions)
-                values = values.flatten()
-                # Normalize advantage
-                advantages = rollout_data.advantages
-                # Normalization does not make sense if mini batchsize == 1, see GH issue #325
-                if self.normalize_advantage and len(advantages) > 1:
-                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                # Get the loss per task
+                task_ids = self._get_task_id(rollout_data.observations)
+                for task_id in range(self.task_count):
+                    task_indices = (task_ids == task_id).nonzero(as_tuple=True)[0]
+                    if len(task_indices) == 0:
+                        continue
+                    obs = rollout_data.observations[task_indices]
+                    acts = actions[task_indices]
+                    values, log_prob, entropy, logits = self.policy.evaluate_actions(task_id, obs, acts)
+                    values = values.flatten()
 
-                # ratio between old and new policy, should be one at the first iteration
-                ratio = torch.exp(log_prob - rollout_data.old_log_prob)
+                    # Normalize advantage
+                    advantages = rollout_data.advantages[task_indices]
+                    # Normalization does not make sense if mini batchsize == 1, see GH issue #325
+                    if self.normalize_advantage and len(advantages) > 1:
+                        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-                # clipped surrogate loss
-                policy_loss_1 = advantages * ratio
-                policy_loss_2 = advantages * torch.clamp(ratio, 1 - clip_range, 1 + clip_range)
-                policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
+                    # ratio between old and new policy, should be one at the first iteration
+                    ratio = torch.exp(log_prob - rollout_data.old_log_prob[task_indices])
 
-                # Logging
-                pg_losses.append(policy_loss.item())
-                clip_fraction = torch.mean((torch.abs(ratio - 1) > clip_range).float()).item()
-                clip_fractions.append(clip_fraction)
+                    # clipped surrogate loss
+                    policy_loss_1 = advantages * ratio
+                    policy_loss_2 = advantages * torch.clamp(ratio, 1 - clip_range, 1 + clip_range)
+                    policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
 
-                if self.clip_range_vf is None:
-                    # No clipping
-                    values_pred = values
-                else:
-                    # Clip the difference between old and new value
-                    # NOTE: this depends on the reward scaling
-                    values_pred = rollout_data.old_values + torch.clamp(
-                        values - rollout_data.old_values, -clip_range_vf, clip_range_vf
-                    )
-                # Value loss using the TD(gae_lambda) target
-                value_loss = F.mse_loss(rollout_data.returns, values_pred)
-                value_losses.append(value_loss.item())
+                    # Logging
+                    pg_losses.append(policy_loss.item())
+                    clip_fraction = torch.mean((torch.abs(ratio - 1) > clip_range).float()).item()
+                    clip_fractions.append(clip_fraction)
 
-                # Entropy loss favor exploration
-                if entropy is None:
-                    # Approximate entropy when no analytical form
-                    entropy_loss = -torch.mean(-log_prob)
-                else:
-                    entropy_loss = -torch.mean(entropy)
+                    if self.clip_range_vf is None:
+                        # No clipping
+                        values_pred = values
+                    else:
+                        # Clip the difference between old and new value
+                        # NOTE: this depends on the reward scaling
+                        values_pred = rollout_data.old_values[task_indices] + torch.clamp(
+                            values - rollout_data.old_values[task_indices], -clip_range_vf, clip_range_vf
+                        )
+                    # Value loss using the TD(gae_lambda) target
+                    value_loss = F.mse_loss(rollout_data.returns[task_indices], values_pred)
+                    value_losses.append(value_loss.item())
 
-                entropy_losses.append(entropy_loss.item())
+                    # Entropy loss favor exploration
+                    if entropy is None:
+                        # Approximate entropy when no analytical form
+                        entropy_loss = -torch.mean(-log_prob)
+                    else:
+                        entropy_loss = -torch.mean(entropy)
 
-                rl_loss = policy_loss + self.ent_coef*entropy_loss + self.vf_coef*value_loss
+                    entropy_losses.append(entropy_loss.item())
 
-                # Compute Behavior Cloning Loss
-                bc_dist = self.baseline_policy(rollout_data.observations)
-                bc_loss = F.binary_cross_entropy_with_logits(logits, bc_dist, reduction="mean")
-                
-                # Decaying Lambda for BC
-                lambda_bc = self.lambda_bc_init * (self.lambda_bc_decay ** self._n_updates)
-                
-                # Total Loss
-                loss = lambda_bc*bc_loss + rl_loss
+                    rl_loss = policy_loss + self.ent_coef*entropy_loss + self.vf_coef*value_loss
 
-                # Calculate approximate form of reverse KL Divergence for early stopping
-                # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
-                # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
-                # and Schulman blog: http://joschu.net/blog/kl-approx.html
-                with torch.no_grad():
-                    log_ratio = log_prob - rollout_data.old_log_prob
-                    approx_kl_div = torch.mean((torch.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
-                    approx_kl_divs.append(approx_kl_div)
+                    # Compute Behavior Cloning Loss
+                    bc_dist = self.baseline_policy(rollout_data.observations[task_indices])
+                    bc_loss = F.binary_cross_entropy_with_logits(logits, bc_dist, reduction="mean")
+                    
+                    # Decaying Lambda for BC
+                    lambda_bc = self.lambda_bc_init * (self.lambda_bc_decay ** self._n_updates)
+                    
+                    # Total Loss
+                    loss = lambda_bc*bc_loss + rl_loss
 
-                if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
-                    continue_training = False
-                    if self.verbose >= 1:
-                        print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
-                    break
+                    # Calculate approximate form of reverse KL Divergence for early stopping
+                    # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
+                    # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
+                    # and Schulman blog: http://joschu.net/blog/kl-approx.html
+                    with torch.no_grad():
+                        log_ratio = log_prob - rollout_data.old_log_prob[task_indices]
+                        approx_kl_div = torch.mean((torch.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+                        approx_kl_divs.append(approx_kl_div)
 
-                # Optimization step
-                self.policy.optimizer.zero_grad()
-                loss.backward()
-                # Clip grad norm
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.policy.optimizer.step()
+                    if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
+                        continue_training = False
+                        if self.verbose >= 1:
+                            print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
+                        break
+
+                    # Optimization step
+                    self.policy.optimizer.zero_grad()
+                    loss.backward()
+                    # Clip grad norm
+                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                    self.policy.optimizer.step()
 
             self._n_updates += 1
             if not continue_training:
@@ -289,6 +466,7 @@ def train_agent(env_id, hand_type, continue_training=False, total_timesteps=1e8,
         ppo_args = PPO_ARGS.copy()
         ppo_args["verbose"] = verbose
         ppo_args["tensorboard_log"] = tensorboard_log
+        ppo_args["policy_kwargs"]["task_count"] = envs.get_attr("OBJECT_TYPES")[0]
         print(f"Loading model from {latest_checkpoint}.")
         model = DAPG.load(path=latest_checkpoint, env=envs, **ppo_args, kwargs=param_dict)
     else:
@@ -311,7 +489,9 @@ def test_agent(env_id, hand_type, n_eval_episodes=250, n_displayed_episodes=5):
 
     # Load model
     print(f"Loading model from {latest_checkpoint}")
-    model = DAPG.load(env=env, path=latest_checkpoint, **PPO_ARGS, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
+    ppo_args = PPO_ARGS.copy()
+    ppo_args["policy_kwargs"]["task_count"] = env.get_attr("OBJECT_TYPES")[0]
+    model = DAPG.load(env=env, path=latest_checkpoint, **ppo_args, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
 
     # Evaluate model
     mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=n_eval_episodes, deterministic=True)

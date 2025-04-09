@@ -21,9 +21,13 @@ class BetterExploration(gym.Wrapper):
         self.env.unwrapped._render_flip = False
 
         # Subtask rewards, so we can track performance on each subtask
-        self._subtask_rewards = {i: [] for i in range(self.env.unwrapped.OBJECT_TYPES)}
-        self._subtask_counts = {i: 0 for i in range(self.env.unwrapped.OBJECT_TYPES)}
-        self._subtask_sums = {i: 0 for i in range(self.env.unwrapped.OBJECT_TYPES)}
+        self._subtask_count = self.env.unwrapped.OBJECT_TYPES
+        self._subtask_rewards = {i: [] for i in range(self._subtask_count)}
+        self._subtask_counts = {i: 0 for i in range(self._subtask_count)}
+        self._subtask_sums = {i: 0 for i in range(self._subtask_count)}
+
+        self._near_target = False
+        self._closed_hand = False
 
     def reset(self, seed=None, options=None):
         obs, info = self.env.reset(seed=seed, options=options)
@@ -40,15 +44,18 @@ class BetterExploration(gym.Wrapper):
         obs = self.modify_obs(obs)
 
         # Use more iterative rewards to enable better exploration
-        dist_to_obj = np.sqrt(obs[4]**2 + (obs[5]*self._xy_ratio)**2) / SQ2
-        dist_to_target = np.sqrt(obs[7]**2 + (obs[8]*self._xy_ratio)**2) / SQ2
-        near_target = np.abs(dist_to_obj) < self._max_dist
-        closed_hand = obs[2] > self._closed_angle and obs[3] < -self._closed_angle
+        hand_pos = obs[self._subtask_count:self._subtask_count+4]
+        obj_pos = obs[self._subtask_count+4:self._subtask_count+7]
+        target_pos = obs[self._subtask_count+7:self._subtask_count+10]
+        dist_to_obj = np.sqrt(obj_pos[0]**2 + (obj_pos[1]*self._xy_ratio)**2) / SQ2
+        dist_to_target = np.sqrt(target_pos[0]**2 + (target_pos[1]*self._xy_ratio)**2) / SQ2
+        self._near_target = np.abs(dist_to_obj) < self._max_dist
+        self._closed_hand = hand_pos[2] > self._closed_angle and hand_pos[3] < -self._closed_angle
         
         # If the object has the target, reward the agent for moving the object to the target
-        if near_target:
-            if closed_hand:
-                reward = (1-dist_to_target)
+        if self._near_target:
+            if self._closed_hand:
+                reward = (1-dist_to_target)**2
             else:
                 reward = -0.1
         # If the hand is not near the object, reward the agent for moving the hand to the object
@@ -83,7 +90,7 @@ class BetterExploration(gym.Wrapper):
 
     def _render_frame(self):
         if self.render_mode:
-            canvas = pygame.Surface((112, 20))
+            canvas = pygame.Surface((400, 20))
             canvas.fill((255, 255, 255))
             if self.render_mode == "rgb_array":
                 prev_canvas = self.env.render()
@@ -95,6 +102,12 @@ class BetterExploration(gym.Wrapper):
         font = pygame.font.Font(None, 24)
         text = font.render(f"Reward: {int(self._total_reward)}", True, (0, 0, 0))
         canvas.blit(text, (4, 4))
+
+        text = font.render(f"Near: {'yes' if self._near_target else 'no'}", True, (0, 0, 0))
+        canvas.blit(text, (120, 4))
+
+        text = font.render(f"Closed: {'yes' if self._closed_hand else 'no'}", True, (0, 0, 0))
+        canvas.blit(text, (240, 4))
 
         if self.render_mode == "human":
             self.env.unwrapped.window.blit(canvas, canvas.get_rect())
@@ -121,9 +134,11 @@ class BetterExploration(gym.Wrapper):
     
     def modify_obs(self, obs):
         # Modify the obs to be relative to the agent
-        obs[4:6] = obs[4:6] - obs[:2]
-        obs[7:9] = obs[7:9] - obs[:2]
-
+        hand_pos = obs[self._subtask_count:self._subtask_count+4]
+        obj_pos = obs[self._subtask_count+4:self._subtask_count+7]
+        target_pos = obs[self._subtask_count+7:self._subtask_count+10]
+        obs[self._subtask_count+4:self._subtask_count+6] = obj_pos[:2] - hand_pos[:2]
+        obs[self._subtask_count+7:self._subtask_count+9] = target_pos[:2] - hand_pos[:2]
         return obs
     
 
