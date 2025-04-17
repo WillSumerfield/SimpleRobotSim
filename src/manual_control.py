@@ -12,10 +12,10 @@ from key_checks import key_presses, get_actions, on_press, on_release
 from hand_morphologies import HAND_TYPES
 
 
-def manual_control(env, hand_type):
+def manual_control(env, hand_type, task_type):
     global key_presses
 
-    options = {"hand_parameters": HAND_TYPES[hand_type]}
+    options = {"hand_parameters": HAND_TYPES[hand_type], "object_type": task_type}
 
     env = gym.make(env, render_mode="human")
     env = BetterExploration(env)

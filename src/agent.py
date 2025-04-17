@@ -5,7 +5,7 @@ My implementation of a PPO agent trained on the Grasper environment.
 import os
 import glob
 import logging
-from typing import Optional, Callable
+from typing import Optional, Callable, Any
 from itertools import product
 from functools import partial
 
@@ -14,41 +14,46 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import gymnasium as gym
+from gymnasium import spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_checker import check_env
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+from stable_baselines3.common.vec_env import VecEnv, SubprocVecEnv, DummyVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback, StopTrainingOnRewardThreshold, EvalCallback, CheckpointCallback
-from stable_baselines3.common.utils import explained_variance
+from stable_baselines3.common.utils import explained_variance, obs_as_tensor
 from stable_baselines3.common.type_aliases import PyTorchObs
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.distributions import Distribution
+from stable_baselines3.common.buffers import RolloutBuffer
 
-from Grasper.wrappers import BetterExploration, HandParams
+from Grasper.wrappers import BetterExploration, HandParams, TaskType
 from baseline import load_baseline
 
 
 CPU_COUNT = os.cpu_count()-4
+REWARD_THRESHOLD = 1000
 CHECKPOINTS_FOLDER = "./checkpoints"
 CHECKPOINT_NAME = "ppo_grasper"
 VIDEOS_FOLDER = "./videos"
 LOGS_FOLDER = "./training_logs"
 MODEL_FOLDER = "./models"
-POLICY_ARGS = {"net_arch": [64, 64], "activation_fn": torch.nn.ReLU}
-PPO_ARGS = {"learning_rate": 1e-4, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
-            "ent_coef": 0.05, "gamma": 0.98}
+POLICY_ARGS = {"net_arch": [128, 128], "activation_fn": torch.nn.ReLU, "optimizer_class": torch.optim.Adam}
+PPO_ARGS = {"learning_rate": 1e-3, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
+            "ent_coef": 0.01, "gamma": 0.98, "n_epochs": 5}
 PARAM_DICT = {"learning_rate": [3e-4, 1e-4], "n_steps": [512, 1024]}
 
 
-def _make_env(env_id, hand_type, record=False):
+def _make_env(env_id, hand_type, task_type, record=False):
     if not record:
         env = gym.make(env_id)
     else:
         env = gym.make(env_id, render_mode="rgb_array")
     env = BetterExploration(env)
     env = HandParams(env, hand_type)
+    if task_type is not None:
+        env = TaskType(env, task_type)
     env = gym.wrappers.FlattenObservation(env)
     env = Monitor(env)
     if not record:
@@ -292,8 +297,8 @@ class DAPG(PPO):
 
         self.lambda_bc_init = 0
         self.lambda_bc_decay = 0.99
-
         self.task_count = self.env.get_attr("OBJECT_TYPES")[0]
+        self.subtask_distribution = None
 
     def _get_task_id(self, obs: PyTorchObs) -> int:
         return obs[:, 0:self.task_count].argmax(dim=1)
@@ -320,7 +325,7 @@ class DAPG(PPO):
             approx_kl_divs = []
             # Do a complete pass on the rollout buffer
             for rollout_data in self.rollout_buffer.get(self.batch_size):
-                actions = rollout_data.actions#.long().flatten()
+                actions = rollout_data.actions
 
                 # Get the loss per task
                 task_ids = self._get_task_id(rollout_data.observations)
@@ -432,18 +437,145 @@ class DAPG(PPO):
         self.logger.record("train/lambda_bc", lambda_bc)
         self.logger.record("train/rl_loss", rl_loss.item())
         self.logger.record("train/bc_loss", bc_loss.item()*lambda_bc)
+        if self.subtask_distribution is not None:
+            for i in range(self.task_count):
+                self.logger.record(f"train/subtask_distribution_{i}", self.subtask_distribution[i])
+                self.logger.record(f"train/subtask_counts_{i}", self.subtask_counts[i])
+
+    def collect_rollouts(
+        self,
+        env: VecEnv,
+        callback: BaseCallback,
+        rollout_buffer: RolloutBuffer,
+        n_rollout_steps: int,
+    ) -> bool:
+        assert self._last_obs is not None, "No previous observation was provided"
+        # Switch to eval mode (this affects batch norm / dropout)
+        self.policy.set_training_mode(False)
+
+        n_steps = 0
+        rollout_buffer.reset()
+        # Sample new weights for the state dependent exploration
+        if self.use_sde:
+            self.policy.reset_noise(env.num_envs)
+
+        callback.on_rollout_start()
+
+        while n_steps < n_rollout_steps:
+            if self.use_sde and self.sde_sample_freq > 0 and n_steps % self.sde_sample_freq == 0:
+                # Sample a new noise matrix
+                self.policy.reset_noise(env.num_envs)
+
+            with torch.no_grad():
+                # Convert to pytorch tensor or to TensorDict
+                obs_tensor = obs_as_tensor(self._last_obs, self.device)
+                actions, values, log_probs = self.policy(obs_tensor)
+            actions = actions.cpu().numpy()
+
+            # Rescale and perform action
+            clipped_actions = actions
+
+            if isinstance(self.action_space, spaces.Box):
+                if self.policy.squash_output:
+                    # Unscale the actions to match env bounds
+                    # if they were previously squashed (scaled in [-1, 1])
+                    clipped_actions = self.policy.unscale_action(clipped_actions)
+                else:
+                    # Otherwise, clip the actions to avoid out of bound error
+                    # as we are sampling from an unbounded Gaussian distribution
+                    clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
+
+            new_obs, rewards, dones, infos = env.step(clipped_actions)
+
+            self.num_timesteps += env.num_envs
+
+            # Give access to local variables
+            callback.update_locals(locals())
+            if not callback.on_step():
+                return False
+
+            self._update_info_buffer(infos, dones)
+            n_steps += 1
+
+            if isinstance(self.action_space, spaces.Discrete):
+                # Reshape in case of discrete action
+                actions = actions.reshape(-1, 1)
+
+            # Handle timeout by bootstrapping with value function
+            # see GitHub issue #633
+            for idx, done in enumerate(dones):
+                if (
+                    done
+                    and infos[idx].get("terminal_observation") is not None
+                    and infos[idx].get("TimeLimit.truncated", False)
+                ):
+                    terminal_obs = self.policy.obs_to_tensor(infos[idx]["terminal_observation"])[0]
+                    with torch.no_grad():
+                        terminal_value = self.policy.predict_values(terminal_obs)[0]  # type: ignore[arg-type]
+                    rewards[idx] += self.gamma * terminal_value
+
+            rollout_buffer.add(
+                self._last_obs,  # type: ignore[arg-type]
+                actions,
+                rewards,
+                self._last_episode_starts,  # type: ignore[arg-type]
+                values,
+                log_probs,
+            )
+            self._last_obs = new_obs  # type: ignore[assignment]
+            self._last_episode_starts = dones
+
+        with torch.no_grad():
+            # Compute value for the last timestep
+            values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))  # type: ignore[arg-type]
+
+        rollout_buffer.compute_returns_and_advantage(last_values=values, dones=dones)
+
+        callback.update_locals(locals())
+
+        callback.on_rollout_end()
+
+        # Update the ratio of subtasks based on the most recent rewards
+        # subtask_rewards = [0]*self.task_count
+        # self.subtask_counts = [0]*self.task_count
+        # for ep in self.ep_info_buffer:
+        #     task = ep["subtask_type"]
+        #     subtask_rewards[task] += ep["r"]
+        #     self.subtask_counts[task] += 1
+        # subtask_sigmoid = [1/(1+np.exp(reward/200)) for reward in subtask_rewards]
+        # subtask_sum = sum(subtask_sigmoid)
+        # self.subtask_distribution = [ss/subtask_sum for ss in subtask_sigmoid]
+        # self.env.set_options({"subtask_distribution": self.subtask_distribution})
+
+        return True
+    
+    def _update_info_buffer(self, infos: list[dict[str, Any]], dones: Optional[np.ndarray] = None) -> None:
+        assert self.ep_info_buffer is not None
+        assert self.ep_success_buffer is not None
+
+        if dones is None:
+            dones = np.array([False] * len(infos))
+        for idx, info in enumerate(infos):
+            maybe_ep_info = info.get("episode")
+            maybe_is_success = info.get("is_success")
+            if maybe_ep_info is not None:
+                subtask_type = info.get("task_type")
+                ep_info = {"subtask_type": subtask_type, "r": maybe_ep_info["r"], "l": maybe_ep_info["l"]}
+                self.ep_info_buffer.extend([ep_info])
+            if maybe_is_success is not None and dones[idx]:
+                self.ep_success_buffer.append(maybe_is_success)
 
 
-def train_agent(env_id, hand_type, continue_training=False, total_timesteps=1e8, param_dict=dict(), verbose=1, provided_envs=None):
+def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=2e7, param_dict=dict(), verbose=1, provided_envs=None):
     if provided_envs is None:
-        envs = make_vec_env(lambda: _make_env(env_id, hand_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
+        envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
     else:
         envs = provided_envs
 
     checkpoint_folder = f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}"
 
     # Callback Functions
-    rew_callback = StopTrainingOnRewardThreshold(reward_threshold=1100, verbose=verbose)
+    rew_callback = StopTrainingOnRewardThreshold(reward_threshold=REWARD_THRESHOLD, verbose=verbose)
     eval_callback = EvalCallback(
         envs, 
         callback_on_new_best=rew_callback,  # Check stopping condition when new best reward is reached
@@ -478,14 +610,14 @@ def train_agent(env_id, hand_type, continue_training=False, total_timesteps=1e8,
     return model
 
 
-def test_agent(env_id, hand_type, n_eval_episodes=250, n_displayed_episodes=5):
+def test_agent(env_id, hand_type, task_type, n_eval_episodes=100, n_displayed_episodes=5):
     # Find latest checkpoint
     checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}_*.zip")
     if not checkpoint_files:
         raise FileNotFoundError("No saved model or checkpoints found.")
     latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
 
-    env = make_vec_env(lambda: _make_env(env_id, hand_type), n_envs=1, vec_env_cls=DummyVecEnv)
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
 
     # Load model
     print(f"Loading model from {latest_checkpoint}")
@@ -499,7 +631,7 @@ def test_agent(env_id, hand_type, n_eval_episodes=250, n_displayed_episodes=5):
 
     # Render the environment
     gym.logger.min_level = logging.ERROR
-    env = _make_env(env_id, hand_type, record=True)
+    env = _make_env(env_id, hand_type, None, record=True)
     episodes = 1
     obj_type = 0
     obs, info = env.reset(options={"object_type": obj_type})
@@ -517,8 +649,8 @@ def test_agent(env_id, hand_type, n_eval_episodes=250, n_displayed_episodes=5):
     print(f"Video saved to {VIDEOS_FOLDER} folder.")
 
 
-def param_sweep(env_id, hand_type, param_dict=None, timesteps_per_param=1e6):
-    envs = make_vec_env(lambda: _make_env(env_id, hand_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
+def param_sweep(env_id, hand_type, task_type, param_dict=None, timesteps_per_param=1e6):
+    envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
     if param_dict is None:
         param_dict = PARAM_DICT
     param_combinations = get_param_combinations(param_dict)
@@ -527,7 +659,7 @@ def param_sweep(env_id, hand_type, param_dict=None, timesteps_per_param=1e6):
     for idx, params in enumerate(param_combinations):
         print(f"{idx+1}/{len(param_combinations)} Training with {params}", end="")
         model = train_agent(env_id, hand_type, total_timesteps=timesteps_per_param, param_dict=params, verbose=0, provided_envs=envs)
-        env = make_vec_env(lambda: _make_env(env_id, hand_type), n_envs=1, vec_env_cls=DummyVecEnv)
+        env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
         mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=25, deterministic=True)
         del model
         if mean_reward > best_performance:

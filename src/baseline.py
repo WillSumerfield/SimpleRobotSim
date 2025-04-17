@@ -10,7 +10,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 
 from demo import load_demos
-from Grasper.wrappers import BetterExploration
+from Grasper.wrappers import BetterExploration, HandParams, TaskType
 
 
 BASELINE_NAME = "baseline_model"
@@ -66,12 +66,14 @@ class TrajectoryDataset(Dataset):
         return self.states[idx], self.actions[idx]
 
 
-def _make_env(env_id, record=False):
+def _make_env(env_id, hand_type, task_type, record=False):
     if not record:
         env = gym.make(env_id)
     else:
         env = gym.make(env_id, render_mode="rgb_array")
     env = BetterExploration(env)
+    env = HandParams(env, hand_type)
+    env = TaskType(env, task_type)
     env = gym.wrappers.FlattenObservation(env)
     if record:
         env = gym.wrappers.RecordVideo(env, video_folder=VIDEOS_FOLDER, episode_trigger=lambda x: True, disable_logger=True)
@@ -147,7 +149,7 @@ def train_baseline(env_id, demo_index, epochs=2000):
     print(f"Baseline model saved to {BASELINE_NAME}.pth")
 
 
-def test_baseline(env_id, n_eval_episodes=25, n_displayed_episodes=5):
+def test_baseline(env_id, hand_type, task_type, n_eval_episodes=25, n_displayed_episodes=5):
     # Create the environment to extract the observation and action space
     env = gym.make(env_id)
     observation_space = env.unwrapped.observation_space.shape[0]
@@ -158,13 +160,13 @@ def test_baseline(env_id, n_eval_episodes=25, n_displayed_episodes=5):
     model = load_baseline(observation_space, action_spaces)
 
     # Evaluate model
-    env = make_vec_env(lambda: _make_env(env_id), n_envs=1, vec_env_cls=DummyVecEnv)
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
     mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=n_eval_episodes, deterministic=False)
     print(f"Mean reward: {mean_reward} +/- {std_reward}")
 
     # Render the environment
     gym.logger.min_level = logging.ERROR
-    env = _make_env(env_id, record=True)
+    env = _make_env(env_id, hand_type, task_type, record=True)
     episodes = 1
     obs, info = env.reset()
     step = 0

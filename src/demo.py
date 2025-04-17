@@ -10,16 +10,18 @@ import os
 import glob
 
 import Grasper
-from Grasper.wrappers import BetterExploration
+from Grasper.wrappers import BetterExploration, HandParams, TaskType
 from key_checks import key_presses, get_actions, on_press, on_release
 
 
 DEMO_FOLDER = "./demos"
 
 
-def provide_demos(env_name):
+def provide_demos(env_name, hand_type, task_type):
     env = gym.make(env_name, render_mode="human")
     env = BetterExploration(env)
+    env = HandParams(env, hand_type)
+    env = TaskType(env, task_type)
     env.reset()
 
     # Start a separate pynput listener thread

@@ -18,34 +18,35 @@ def main():
     parser.add_argument("--demo-index", type=int, help="The demo index to train the baseline on.", default=1)
     parser.add_argument("--replay", type=int, help="Playback the provided demo collection number.")
     parser.add_argument("--hand-type", type=int, help="The index of the pre-defined hand to use. Claw default.", default=0)
+    parser.add_argument("--task-type", type=int, help="The index of the subtask to train/test on. Defaults to all objects.", default=None)
     args = parser.parse_args()
 
     if args.env == "manipulation":
         args.env = "Grasper/Manipulation-v0"
 
     if args.mode == "test":
-        test_agent(args.env, args.hand_type)
+        test_agent(args.env, args.hand_type, args.task_type)
         
     elif args.mode == "train":
-        train_agent(args.env, args.hand_type, continue_training=args.continue_training)
+        train_agent(args.env, args.hand_type, args.task_type, continue_training=args.continue_training)
 
     elif args.mode == "manual":
-        manual_control(args.env, args.hand_type)
+        manual_control(args.env, args.hand_type, args.task_type)
     
     elif args.mode == "demo":
         if args.replay:
             play_demos(args.env, args.hand_type, args.replay)
         else:
-            provide_demos(args.env)
+            provide_demos(args.env, args.hand_type, args.task_type)
     
     elif args.mode == "train_baseline":
         train_baseline(args.env, args.demo_index)
 
     elif args.mode == "test_baseline":
-        test_baseline(args.env)
+        test_baseline(args.env, args.hand_type, args.task_type)
 
     elif args.mode == "param_sweep":
-        param_sweep(args.env, args.hand_type)
+        param_sweep(args.env, args.hand_type, args.task_type)
 
 if __name__ == "__main__":
     main()

@@ -12,7 +12,7 @@ PI2 = np.pi * 2
 
 class BetterExploration(gym.Wrapper):
 
-    CLOSED_PERCENTAGE = 0.7
+    CLOSED_PERCENTAGE = 0.6
     DIGIT_LENGTH_PERCENTAGE = 0.3
 
     def __init__(self, env):
@@ -152,5 +152,19 @@ class HandParams(gym.Wrapper):
         if not options:
             options = {}
         options["hand_parameters"] = self.hand_params
+        obs, info = self.env.reset(seed=seed, options=options)
+        return obs, info
+    
+
+class TaskType(gym.Wrapper):
+    def __init__(self, env, task_type):
+        super().__init__(env)
+        self.env = env
+        self.task_type = task_type
+
+    def reset(self, seed=None, options=None):
+        if not options:
+            options = {}
+        options["object_type"] = self.task_type
         obs, info = self.env.reset(seed=seed, options=options)
         return obs, info

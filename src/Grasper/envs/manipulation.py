@@ -345,6 +345,9 @@ class ManipulationEnv(gym.Env):
         # What the agent can do
         self.action_space = spaces.MultiDiscrete([self.MOVEMENT_SPACE, self.ROTATION_SPACE, self.OPEN_SPACE])
 
+        # The distribution of subtasks
+        self.subtask_distribution = [1/self.OBJECT_TYPES]*self.OBJECT_TYPES # Uniform distribution
+
         self._action_to_direction = {
             MoveActions.none.value:  np.array([0,  0]),
             MoveActions.right.value: np.array([1,  0]),
@@ -382,7 +385,7 @@ class ManipulationEnv(gym.Env):
         return np.concat((self._object.get_type(), self._hand.get_state(), self._object.get_state(), self._obs_target_position), dtype=float)
     
     def _get_info(self):
-        return {}
+        return {"task_type": self._object.get_type().argmax()}
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -392,6 +395,9 @@ class ManipulationEnv(gym.Env):
             options = {}
         hand_parameters = options.get("hand_parameters", None)
         object_type = options.get("object_type", None)
+        self.subtask_distribution = options.get("subtask_distribution", self.subtask_distribution)
+        if object_type is None: # Use the distribution when object type is not provided.
+            object_type = np.random.choice(len(self.subtask_distribution), p=self.subtask_distribution)
 
         self._elapsed_steps = 0
 
