@@ -13,7 +13,7 @@ from demo import load_demos
 from Grasper.wrappers import BetterExploration, HandParams, TaskType
 
 
-BASELINE_NAME = "baseline_model"
+BASELINE_PATH = "models/baseline/baseline_model.pth"
 VIDEOS_FOLDER = "./videos"
 
 
@@ -80,17 +80,15 @@ def _make_env(env_id, hand_type, task_type, record=False):
     return env
 
 
-def load_baseline(obs_space, action_space, device, verbose=True):
+def load_baseline(device, verbose=True):
     # Load the baseline model
-    model_path = f"{BASELINE_NAME}.pth"
-    if not os.path.exists(model_path):
+    if not os.path.exists(BASELINE_PATH):
         raise FileNotFoundError("No saved model or checkpoints found.")
 
     # Load model
     if verbose:
-        print(f"Loading baseline from {model_path}")
-    model = BaselineModel(obs_space, action_space)
-    model.load_state_dict(torch.load(model_path))
+        print(f"Loading baseline from {BASELINE_PATH}")
+    model = torch.load(BASELINE_PATH, weights_only=False)
     model.to(device)
     model.eval()
     
@@ -145,19 +143,13 @@ def train_baseline(env_id, demo_index, epochs=2000):
         print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss / len(dataloader):.4f}, Num Wrong: {num_wrong}")
 
     # Save the model
-    torch.save(policy.state_dict(), f"{BASELINE_NAME}.pth")
-    print(f"Baseline model saved to {BASELINE_NAME}.pth")
+    torch.save(policy, f"{BASELINE_PATH}")
+    print(f"Baseline model saved to {BASELINE_PATH}")
 
 
 def test_baseline(env_id, hand_type, task_type, n_eval_episodes=25, n_displayed_episodes=5):
-    # Create the environment to extract the observation and action space
-    env = gym.make(env_id)
-    observation_space = env.unwrapped.observation_space.shape[0]
-    action_types = env.unwrapped.action_space.shape[0]
-    action_spaces = env.unwrapped.action_space.nvec.tolist()
-
     # Load the baseline model
-    model = load_baseline(observation_space, action_spaces)
+    model = load_baseline()
 
     # Evaluate model
     env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)

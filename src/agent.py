@@ -29,7 +29,7 @@ from stable_baselines3.common.distributions import Distribution
 from stable_baselines3.common.buffers import RolloutBuffer
 
 from Grasper.wrappers import BetterExploration, HandParams, TaskType
-from baseline import load_baseline
+from baseline import BASELINE_PATH, load_baseline
 
 
 CPU_COUNT = os.cpu_count()-4
@@ -59,7 +59,11 @@ def _make_env(env_id, hand_type, task_type, record=False):
     if not record:
         check_env(env)
     else:
-        env = gym.wrappers.RecordVideo(env, video_folder=f"{VIDEOS_FOLDER}/hand_type_{hand_type}", episode_trigger=lambda x: True, disable_logger=True)
+        if task_type is None:
+            video_folder = f"{VIDEOS_FOLDER}/hand_type_{hand_type}"
+        else:
+            video_folder = f"{VIDEOS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
+        env = gym.wrappers.RecordVideo(env, video_folder=video_folder, episode_trigger=lambda x: True, disable_logger=True)
     return env
 
 
@@ -179,7 +183,7 @@ class MultiTaskMlpPolicy(ActorCriticPolicy):
 
         latent_dim_pi = self.mlp_extractor.latent_dim_pi
         self.action_nets = nn.ModuleList([self.action_dist.proba_distribution_net(latent_dim=latent_dim_pi) for _ in range(self.task_count)])
-        self.value_nets = nn.ModuleList([PopArt(self.mlp_extractor.latent_dim_vf) for _ in range(self.task_count)])
+        self.value_nets = nn.ModuleList([nn.Linear(self.mlp_extractor.latent_dim_vf, 1) for _ in range(self.task_count)])
 
         # Init weights: use orthogonal initialization with small initial weight for the output
         if self.ortho_init:
@@ -290,15 +294,22 @@ class DAPG(PPO):
             args["policy"] = MultiTaskMlpPolicy
         args["policy_kwargs"]["task_count"] = kwargs["env"].get_attr("OBJECT_TYPES")[0]
         super().__init__(**{**args, **kwargs})
-        self.baseline_policy = load_baseline(self.observation_space.shape[0], self.action_space.nvec.tolist(), device=self.device, verbose=self.verbose)
+        self.baseline_policy = load_baseline(device=self.device, verbose=self.verbose)
         self.baseline_policy.eval()
         for param in self.baseline_policy.parameters():
             param.requires_grad = False
 
-        self.lambda_bc_init = 0
-        self.lambda_bc_decay = 0.99
+        self.lambda_bc_init = 0.3
+        self.lambda_bc_decay = 0.98
         self.task_count = self.env.get_attr("OBJECT_TYPES")[0]
         self.subtask_distribution = None
+
+        # Normalize value for each reward
+        self.beta = 0.999
+        self.epsilon = 1e-5
+        self.subtask_value_mu = [torch.tensor(0.0) for _ in range(self.task_count)]
+        self.subtask_value_sigma = [torch.tensor(1.0) for _ in range(self.task_count)]
+        self.subtask_value_mean_square = [torch.tensor(1.0) for _ in range(self.task_count)]
 
     def _get_task_id(self, obs: PyTorchObs) -> int:
         return obs[:, 0:self.task_count].argmax(dim=1)
@@ -317,6 +328,7 @@ class DAPG(PPO):
 
         entropy_losses = []
         pg_losses, value_losses = [], []
+        rl_losses, bc_losses = [], []
         clip_fractions = []
 
         continue_training = True
@@ -357,6 +369,7 @@ class DAPG(PPO):
                     clip_fraction = torch.mean((torch.abs(ratio - 1) > clip_range).float()).item()
                     clip_fractions.append(clip_fraction)
 
+                    # Value function loss
                     if self.clip_range_vf is None:
                         # No clipping
                         values_pred = values
@@ -367,7 +380,9 @@ class DAPG(PPO):
                             values - rollout_data.old_values[task_indices], -clip_range_vf, clip_range_vf
                         )
                     # Value loss using the TD(gae_lambda) target
-                    value_loss = F.mse_loss(rollout_data.returns[task_indices], values_pred)
+                    target_values = rollout_data.returns[task_indices]
+                    value_loss = F.mse_loss(target_values, values_pred)
+                    value_loss = self._normalize_subtask_value_loss(value_loss, task_id)
                     value_losses.append(value_loss.item())
 
                     # Entropy loss favor exploration
@@ -380,10 +395,12 @@ class DAPG(PPO):
                     entropy_losses.append(entropy_loss.item())
 
                     rl_loss = policy_loss + self.ent_coef*entropy_loss + self.vf_coef*value_loss
+                    rl_losses.append(rl_loss.item())
 
                     # Compute Behavior Cloning Loss
                     bc_dist = self.baseline_policy(rollout_data.observations[task_indices])
                     bc_loss = F.binary_cross_entropy_with_logits(logits, bc_dist, reduction="mean")
+                    bc_losses.append(bc_loss.item())
                     
                     # Decaying Lambda for BC
                     lambda_bc = self.lambda_bc_init * (self.lambda_bc_decay ** self._n_updates)
@@ -435,8 +452,8 @@ class DAPG(PPO):
         if self.clip_range_vf is not None:
             self.logger.record("train/clip_range_vf", clip_range_vf)
         self.logger.record("train/lambda_bc", lambda_bc)
-        self.logger.record("train/rl_loss", rl_loss.item())
-        self.logger.record("train/bc_loss", bc_loss.item()*lambda_bc)
+        self.logger.record("train/rl_loss", np.mean(rl_losses))
+        self.logger.record("train/bc_loss", np.mean(bc_losses)*lambda_bc)
         if self.subtask_distribution is not None:
             for i in range(self.task_count):
                 self.logger.record(f"train/subtask_distribution_{i}", self.subtask_distribution[i])
@@ -565,6 +582,23 @@ class DAPG(PPO):
             if maybe_is_success is not None and dones[idx]:
                 self.ep_success_buffer.append(maybe_is_success)
 
+    def _normalize_subtask_value_loss(self, value_loss: torch.Tensor, subtask_id: int):
+        value_loss_nograd = value_loss.detach().clone()
+        batch_mean = value_loss_nograd.mean()
+        batch_mean_sq = (value_loss_nograd**2).mean()
+        
+        # Update running averages with EMA
+        new_mean = self.beta * self.subtask_value_mu[subtask_id] + (1 - self.beta) * batch_mean
+        new_mean_sq = self.beta * self.subtask_value_mean_square[subtask_id] + (1 - self.beta) * batch_mean_sq
+        new_sigma = torch.sqrt(new_mean_sq - new_mean**2 + self.epsilon)
+        
+        # Update running normalization values
+        self.subtask_value_mu[subtask_id].copy_(new_mean)
+        self.subtask_value_mean_square[subtask_id].copy_(new_mean_sq)
+        self.subtask_value_sigma[subtask_id].copy_(new_sigma)
+
+        return (value_loss - self.subtask_value_mu[subtask_id]) / self.subtask_value_sigma[subtask_id]
+
 
 def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=2e7, param_dict=dict(), verbose=1, provided_envs=None):
     if provided_envs is None:
@@ -572,14 +606,14 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
     else:
         envs = provided_envs
 
-    checkpoint_folder = f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}"
+    checkpoint_folder = f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
 
     # Callback Functions
     rew_callback = StopTrainingOnRewardThreshold(reward_threshold=REWARD_THRESHOLD, verbose=verbose)
     eval_callback = EvalCallback(
         envs, 
         callback_on_new_best=rew_callback,  # Check stopping condition when new best reward is reached
-        eval_freq=2e4,
+        eval_freq=1e4,
         n_eval_episodes=25,
         deterministic=True,
         verbose=verbose
@@ -587,7 +621,7 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
     checkpoint_callback = CheckpointCallback(save_freq=1e4, save_path=checkpoint_folder, name_prefix=CHECKPOINT_NAME, verbose=verbose)
     subtask_reward_callback = SubtaskRewardLogger(envs, verbose=verbose)
 
-    tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}"
+    tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
     
     # Load or create model
     if continue_training:
@@ -606,24 +640,36 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
 
     # Train model
     model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, eval_callback, subtask_reward_callback])
-    model.save(f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}")
+    model.save(f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}")
     return model
 
 
-def test_agent(env_id, hand_type, task_type, n_eval_episodes=100, n_displayed_episodes=5):
+def test_agent(env_id, hand_type, task_type, n_eval_episodes=100, n_displayed_episodes=5, checkpoint=True):
+
     # Find latest checkpoint
-    checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}_*.zip")
-    if not checkpoint_files:
-        raise FileNotFoundError("No saved model or checkpoints found.")
-    latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
+    if checkpoint:
+        if task_type is None:
+            checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}_*.zip")
+        else:
+            checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}_*.zip")
+        if not checkpoint_files:
+            raise FileNotFoundError("No saved model or checkpoints found.")
+        model_path = max(checkpoint_files, key=os.path.getctime)
+
+    # Find the specific model
+    else:
+        if task_type is None:
+            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
+        else:
+            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
 
     env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
 
     # Load model
-    print(f"Loading model from {latest_checkpoint}")
+    print(f"Loading model from {model_path}")
     ppo_args = PPO_ARGS.copy()
     ppo_args["policy_kwargs"]["task_count"] = env.get_attr("OBJECT_TYPES")[0]
-    model = DAPG.load(env=env, path=latest_checkpoint, **ppo_args, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
+    model = DAPG.load(env=env, path=model_path, **ppo_args, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
 
     # Evaluate model
     mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=n_eval_episodes, deterministic=True)
@@ -631,9 +677,9 @@ def test_agent(env_id, hand_type, task_type, n_eval_episodes=100, n_displayed_ep
 
     # Render the environment
     gym.logger.min_level = logging.ERROR
-    env = _make_env(env_id, hand_type, None, record=True)
+    env = _make_env(env_id, hand_type, task_type, record=True)
     episodes = 1
-    obj_type = 0
+    obj_type = 0 if task_type is None else task_type
     obs, info = env.reset(options={"object_type": obj_type})
     while True:
         action, _states = model.predict(obs, deterministic=True)
@@ -641,6 +687,8 @@ def test_agent(env_id, hand_type, task_type, n_eval_episodes=100, n_displayed_ep
         env.render()
         if done or terminated:
             if episodes >= n_displayed_episodes:
+                break
+            if task_type is not None:
                 break
             obj_type += 1
             obs, info = env.reset(options={"object_type": obj_type})
@@ -675,3 +723,38 @@ def get_param_combinations(param_dict):
     value_combinations = list(product(*param_values))
     param_combinations = [dict(zip(param_names, values)) for values in value_combinations]
     return param_combinations
+
+
+def convert_to_baseline(env_id, hand_type, task_type, checkpoint=True):
+
+    # Find latest checkpoint
+    if checkpoint:
+        if task_type is None:
+            checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}_*.zip")
+        else:
+            checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}_*.zip")
+        if not checkpoint_files:
+            raise FileNotFoundError("No saved model or checkpoints found.")
+        model_path = max(checkpoint_files, key=os.path.getctime)
+
+    # Find the specific model
+    else:
+        if task_type is None:
+            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
+        else:
+            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
+    
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
+
+    # Load model
+    print(f"Loading model from {model_path}")
+    ppo_args = PPO_ARGS.copy()
+    ppo_args["policy_kwargs"]["task_count"] = env.get_attr("OBJECT_TYPES")[0]
+    model = DAPG.load(env=env, path=model_path, **ppo_args, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
+
+    # Combine the latent compressor and the task head
+    model = nn.Sequential(model.policy.mlp_extractor.policy_net, model.policy.action_nets[task_type])
+
+    # Save the model
+    torch.save(model, f"{BASELINE_PATH}")
+    print(f"Baseline model saved to {BASELINE_PATH}")

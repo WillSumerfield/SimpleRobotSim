@@ -90,7 +90,7 @@ class BetterExploration(gym.Wrapper):
 
     def _render_frame(self):
         if self.render_mode:
-            canvas = pygame.Surface((400, 20))
+            canvas = pygame.Surface((WINDOW_SIZE[0], 20))
             canvas.fill((255, 255, 255))
             if self.render_mode == "rgb_array":
                 prev_canvas = self.env.render()
@@ -99,15 +99,18 @@ class BetterExploration(gym.Wrapper):
                     pygame.init()
 
         # Draw the current reward
-        font = pygame.font.Font(None, 24)
-        text = font.render(f"Reward: {int(self._total_reward)}", True, (0, 0, 0))
-        canvas.blit(text, (4, 4))
+        font = pygame.font.Font(None, 16)
+        text = font.render(f"Rew: {int(self._total_reward)}", True, (0, 0, 0))
+        canvas.blit(text, (2, 4))
 
         text = font.render(f"Near: {'yes' if self._near_target else 'no'}", True, (0, 0, 0))
+        canvas.blit(text, (60, 4))
+
+        text = font.render(f"Open: {'no' if self._closed_hand else 'yes'}", True, (0, 0, 0))
         canvas.blit(text, (120, 4))
 
-        text = font.render(f"Closed: {'yes' if self._closed_hand else 'no'}", True, (0, 0, 0))
-        canvas.blit(text, (240, 4))
+        text = font.render(f"Time: {self.env.unwrapped._elapsed_steps}/{self.env.unwrapped.MAX_TIME}", True, (0, 0, 0))
+        canvas.blit(text, (180, 4))
 
         if self.render_mode == "human":
             self.env.unwrapped.window.blit(canvas, canvas.get_rect())

@@ -7,7 +7,7 @@ import pymunk
 
 
 # Constants
-WINDOW_SIZE = np.array([512, 384])  # The size of the space
+WINDOW_SIZE = np.array([256, 256])  # The size of the space
 FLOOR_Y = 32
 FLOOR_COLOR = (64, 64, 64)
 PI2 = 2*np.pi
@@ -75,12 +75,11 @@ class Hand():
     BASE_COLOR = (0, 0, 0)
     SEGMENT_COLOR = (128, 128, 128)
     BASE_RADIUS = 32
-    MIN_Y_SPAWN = 256
+    MIN_Y_SPAWN = 192
     MIN_ANGLE = HPI
     SEGMENT_MASS = 10
     SEGMENT_WIDTH = 8
     SEGMENT_OFFSET = np.sqrt((BASE_RADIUS**2)/2)
-    MAX_POS = np.array([WINDOW_SIZE[0], WINDOW_SIZE[1]-1])
     SEGMENT_L_COLLISION_FILTER = pymunk.ShapeFilter(categories=0b100, mask=pymunk.ShapeFilter.ALL_MASKS() ^ 0b100)
     SEGMENT_R_COLLISION_FILTER = pymunk.ShapeFilter(categories=0b1000, mask=pymunk.ShapeFilter.ALL_MASKS() ^ 0b1000)
     SEGMENT_COLLISION_FILTER = pymunk.ShapeFilter(categories=0b1100, mask=pymunk.ShapeFilter.ALL_MASKS() ^ 0b1100)
@@ -101,7 +100,8 @@ class Hand():
         max_r_length = max(np.cos(self.parameters.joint_angle[1])*self.parameters.segment_lengths[1]+self.parameters.segment_lengths[3],
                            self.parameters.segment_lengths[1]+np.cos(self.parameters.joint_angle[1])*self.parameters.segment_lengths[3])
         self.max_digit_len = max(max_l_length, max_r_length)
-        self.MIN_POS = np.array([0, FLOOR_Y+self.SEGMENT_OFFSET+self.max_digit_len])
+        self.MIN_POS = np.array([-self.BASE_RADIUS, FLOOR_Y+self.SEGMENT_OFFSET+self.max_digit_len])
+        self.MAX_POS = np.array([WINDOW_SIZE[0]+self.BASE_RADIUS, WINDOW_SIZE[1]+self.BASE_RADIUS+self.max_digit_len])
         self.segment_vertices = [get_rect_vertices((self.SEGMENT_WIDTH, length)) for length in self.parameters.segment_lengths]
         segment_mois = [pymunk.moment_for_poly(self.SEGMENT_MASS, vertices) for vertices in self.segment_vertices]
         
@@ -267,7 +267,7 @@ class Object():
             self._shape2.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
 
         # Set the object's properties
-        self._body.position = ((WINDOW_SIZE[0]-2*self.SPAWN_X_BUFFER)*rng.random(dtype=float) + self.SPAWN_X_BUFFER, FLOOR_Y+self.SIZE)
+        self._body.position = ((WINDOW_SIZE[0]-2*self.SPAWN_X_BUFFER)*rng.random(dtype=float) + self.SPAWN_X_BUFFER, FLOOR_Y+self.SIZE/2)
         self._shape.friction = self.FRICTION
         self._shape.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
 
@@ -321,7 +321,7 @@ class ManipulationEnv(gym.Env):
     GRAVITY = -256
     PHYSICS_TIMESTEP = 1/50
     TARGET_Y_BUFFER = 32
-    MAX_TIME = 400
+    MAX_TIME = 250
 
     AGENT_SPACE = 4 # x, y, digit_angle1, digit_angle2
     OBJECT_SPACE = 3 # x, y, angle
