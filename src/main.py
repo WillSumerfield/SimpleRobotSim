@@ -4,14 +4,14 @@ Users can play the Grasper environments, train a new agent, or test the current 
 import argparse
 
 from manual_control import manual_control
-from agent import train_agent, test_agent, param_sweep, convert_to_baseline
+from agent import train_agent, test_agent, param_sweep, convert_to_baseline, get_video
 from demo import provide_demos, play_demos
 from baseline import train_baseline, test_baseline
 
 
 def main():
     parser = argparse.ArgumentParser(description="Simple Robot Simulator")
-    parser.add_argument("mode", choices=["test", "train", "manual", "demo", "train-baseline", "test-baseline", "convert-to-baseline", "param-sweep"], help="Mode of operation")
+    parser.add_argument("mode", choices=["test", "train", "manual", "demo", "train-baseline", "test-baseline", "convert-to-baseline", "param-sweep", "get-video"], help="Mode of operation")
     parser.add_argument("env", choices=["manipulation", "claw_game"], help="Mode of operation")
     parser.add_argument("--continue-training", action="store_true", help="Use the latest checkpoint to continue training")
     parser.add_argument("--agent-save-file", type=str, help="File to save or load the agent", default="agent.pkl")
@@ -51,6 +51,9 @@ def main():
 
     elif args.mode == "param-sweep":
         param_sweep(args.env, args.hand_type, args.task_type)
+
+    elif args.mode == "get-video":
+        get_video(args.env, args.hand_type, args.task_type)
 
 if __name__ == "__main__":
     main()

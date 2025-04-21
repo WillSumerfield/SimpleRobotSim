@@ -105,73 +105,6 @@ class SubtaskRewardLogger(BaseCallback):
         pass
 
 
-class PopArt(nn.Module):
-    def __init__(self, input_dim, beta=0.99, epsilon=1e-5):
-        """
-        Initializes a PopArt layer.
-        
-        Args:
-            input_dim (int): Dimension of the input from the encoder.
-            beta (float): EMA decay factor.
-            epsilon (float): Small value to ensure numerical stability.
-        """
-        super().__init__()
-        self.beta = beta
-        self.epsilon = epsilon
-        
-        # Instead of using nn.Parameter (with gradients disabled),
-        # we register these as buffers so they move with the model.
-        self.register_buffer('mu', torch.tensor(0.0))
-        self.register_buffer('sigma', torch.tensor(1.0))
-        self.register_buffer('mean_square', torch.tensor(1.0))
-        
-        # The final linear layer predicts a normalized value.
-        self.linear = nn.Linear(input_dim, 1)
-    
-    def forward(self, x):
-        """
-        Returns the unnormalized value by scaling the normalized prediction.
-        """
-        # The network outputs a normalized value. We then rescale it using the current sigma and mu.
-        return self.sigma * self.linear(x) + self.mu
-
-    def update(self, targets):
-        """
-        Updates the running estimates for mu and sigma using an exponential moving average.
-        It then adjusts the weights of the linear layer so that the unnormalized output remains unchanged.
-        
-        Args:
-            targets (Tensor): The target returns as a 1D tensor.
-        """
-        with torch.no_grad():
-            # Save the old values for the adjustment.
-            old_mu = self.mu.clone()
-            old_sigma = self.sigma.clone()
-            
-            # Compute statistics from the batch of target returns.
-            batch_mean = targets.mean()
-            batch_mean_sq = (targets**2).mean()
-            
-            # Update running averages with EMA.
-            new_mean = self.beta * self.mu + (1 - self.beta) * batch_mean
-            new_mean_sq = self.beta * self.mean_square + (1 - self.beta) * batch_mean_sq
-            new_sigma = torch.sqrt(new_mean_sq - new_mean**2 + self.epsilon)
-            
-            # Update buffers.
-            self.mu.copy_(new_mean)
-            self.mean_square.copy_(new_mean_sq)
-            self.sigma.copy_(new_sigma)
-            
-            # Adjust the output layer's parameters to preserve the unnormalized value.
-            # Let f(x) = W*x + b, and our value prediction is V(x)=sigma*f(x) + mu.
-            # When mu and sigma change, we update:
-            #   W' = (old_sigma / new_sigma) * W
-            #   b' = (old_sigma * b + old_mu - new_mean) / new_sigma
-            self.linear.weight.data.mul_(old_sigma / new_sigma)
-            self.linear.bias.data.mul_(old_sigma / new_sigma)
-            self.linear.bias.data.add_((old_mu - new_mean) / new_sigma)
-
-
 class MultiTaskMlpPolicy(ActorCriticPolicy):
 
     def __init__(self, *args, **kwargs):
@@ -600,13 +533,16 @@ class DAPG(PPO):
         return (value_loss - self.subtask_value_mu[subtask_id]) / self.subtask_value_sigma[subtask_id]
 
 
-def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=2e7, param_dict=dict(), verbose=1, provided_envs=None):
+def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=1.5e7, param_dict=dict(), verbose=1, provided_envs=None):
     if provided_envs is None:
         envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
     else:
         envs = provided_envs
 
-    checkpoint_folder = f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
+    if task_type is None:
+        checkpoint_folder = f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_multitask"
+    else:
+        checkpoint_folder = f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
 
     # Callback Functions
     rew_callback = StopTrainingOnRewardThreshold(reward_threshold=REWARD_THRESHOLD, verbose=verbose)
@@ -621,7 +557,10 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
     checkpoint_callback = CheckpointCallback(save_freq=1e4, save_path=checkpoint_folder, name_prefix=CHECKPOINT_NAME, verbose=verbose)
     subtask_reward_callback = SubtaskRewardLogger(envs, verbose=verbose)
 
-    tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
+    if task_type is None:
+        tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}_multitask"
+    else:
+        tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
     
     # Load or create model
     if continue_training:
@@ -758,3 +697,51 @@ def convert_to_baseline(env_id, hand_type, task_type, checkpoint=True):
     # Save the model
     torch.save(model, f"{BASELINE_PATH}")
     print(f"Baseline model saved to {BASELINE_PATH}")
+
+
+def get_video(env_id, hand_type, task_type):
+
+    # Load the model
+    if task_type is None:
+        model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
+    else:
+        model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
+
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
+
+    # Load model
+    print(f"Loading model from {model_path}")
+    ppo_args = PPO_ARGS.copy()
+    task_count = env.get_attr("OBJECT_TYPES")[0]
+    ppo_args["policy_kwargs"]["task_count"] = task_count
+    model = DAPG.load(env=env, path=model_path, **ppo_args, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
+
+    # Render the environment
+    gym.logger.min_level = logging.ERROR
+    env = _make_env(env_id, hand_type, task_type, record=True)
+    obj_type = 0 if task_type is None else task_type
+    obs, info = env.reset(options={"object_type": obj_type})
+    while True: # Loop until the user is satified with the video
+        episodes = 1
+        while True:
+            action, _states = model.predict(obs, deterministic=True)
+            obs, reward, done, terminated, info = env.step(action)
+            env.render()
+            if done or terminated:
+                if episodes >= task_count:
+                    break
+                if task_type is not None:
+                    break
+                obj_type += 1
+                obs, info = env.reset(options={"object_type": obj_type})
+                episodes += 1
+
+        # Ask the user if they want regenerate the video
+        while True:
+            obj_type = 0 if task_type is None else task_type
+            obs, info = env.reset(options={"object_type": obj_type})
+            user_input = input("Do you want to generate a new video? (y/n): ").strip().lower()
+            if user_input == 'y':
+                break
+            else:
+                return
