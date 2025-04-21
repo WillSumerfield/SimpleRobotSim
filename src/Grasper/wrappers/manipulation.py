@@ -12,7 +12,7 @@ PI2 = np.pi * 2
 
 class BetterExploration(gym.Wrapper):
 
-    CLOSED_PERCENTAGE = 0.6
+    CLOSED_PERCENTAGE = 0.3
     DIGIT_LENGTH_PERCENTAGE = 0.3
 
     def __init__(self, env):
@@ -31,7 +31,7 @@ class BetterExploration(gym.Wrapper):
 
     def reset(self, seed=None, options=None):
         obs, info = self.env.reset(seed=seed, options=options)
-        self._closed_angle = self.env.unwrapped._hand.parameters.rotation_max * self.CLOSED_PERCENTAGE / (np.pi*2)
+        self._closed_angle = ((self.env.unwrapped._hand.parameters.rotation_max - self.env.unwrapped._hand.MIN_ANGLE)*self.CLOSED_PERCENTAGE + self.env.unwrapped._hand.MIN_ANGLE) / (np.pi*2)
         self._max_dist = (self.env.unwrapped._hand.max_digit_len*self.DIGIT_LENGTH_PERCENTAGE + self.env.unwrapped._hand.BASE_RADIUS + self.env.unwrapped._object.SIZE/2) / WINDOW_SIZE[0]
         self._xy_ratio = WINDOW_SIZE[1]/WINDOW_SIZE[0]
         self._total_reward = 0
@@ -51,7 +51,7 @@ class BetterExploration(gym.Wrapper):
         dist_to_target = np.sqrt(target_pos[0]**2 + (target_pos[1]*self._xy_ratio)**2) / SQ2
         self._near_target = np.abs(dist_to_obj) < self._max_dist
         self._closed_hand = hand_pos[2] > self._closed_angle and hand_pos[3] < -self._closed_angle
-        
+
         # If the object has the target, reward the agent for moving the object to the target
         if self._near_target:
             if self._closed_hand:
