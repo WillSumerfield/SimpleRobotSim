@@ -39,10 +39,10 @@ CHECKPOINT_NAME = "ppo_grasper"
 VIDEOS_FOLDER = "./videos"
 LOGS_FOLDER = "./training_logs"
 MODEL_FOLDER = "./models"
-POLICY_ARGS = {"net_arch": [128, 128], "activation_fn": torch.nn.ReLU, "optimizer_class": torch.optim.Adam}
+POLICY_ARGS = {"net_arch": [64, 64], "activation_fn": torch.nn.ReLU, "optimizer_class": torch.optim.Adam}
 PPO_ARGS = {"learning_rate": 1e-3, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
             "ent_coef": 0.01, "gamma": 0.98, "n_epochs": 5}
-PARAM_DICT = {"learning_rate": [3e-4, 1e-4], "n_steps": [512, 1024]}
+PARAM_DICT = {"gamma": [0.98], "ent_coef": [0.01, 0.1]}
 
 
 def _make_env(env_id, hand_type, task_type, record=False):
@@ -244,6 +244,8 @@ class DAPG(PPO):
         self.subtask_value_sigma = [torch.tensor(1.0) for _ in range(self.task_count)]
         self.subtask_value_mean_square = [torch.tensor(1.0) for _ in range(self.task_count)]
 
+        self.use_baseline = True
+
     def _get_task_id(self, obs: PyTorchObs) -> int:
         return obs[:, 0:self.task_count].argmax(dim=1)
 
@@ -331,8 +333,11 @@ class DAPG(PPO):
                     rl_losses.append(rl_loss.item())
 
                     # Compute Behavior Cloning Loss
-                    bc_dist = self.baseline_policy(rollout_data.observations[task_indices])
-                    bc_loss = F.binary_cross_entropy_with_logits(logits, bc_dist, reduction="mean")
+                    if self.use_baseline:
+                        bc_dist = self.baseline_policy(rollout_data.observations[task_indices])
+                        bc_loss = F.binary_cross_entropy_with_logits(logits, bc_dist, reduction="mean")
+                    else:
+                        bc_loss = torch.tensor(0.0, device=self.device)
                     bc_losses.append(bc_loss.item())
                     
                     # Decaying Lambda for BC
@@ -636,7 +641,7 @@ def test_agent(env_id, hand_type, task_type, n_eval_episodes=100, n_displayed_ep
     print(f"Video saved to {VIDEOS_FOLDER} folder.")
 
 
-def param_sweep(env_id, hand_type, task_type, param_dict=None, timesteps_per_param=1e6):
+def param_sweep(env_id, hand_type, task_type, param_dict=None, timesteps_per_param=8e6):
     envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
     if param_dict is None:
         param_dict = PARAM_DICT
@@ -645,7 +650,7 @@ def param_sweep(env_id, hand_type, task_type, param_dict=None, timesteps_per_par
     best_params = None
     for idx, params in enumerate(param_combinations):
         print(f"{idx+1}/{len(param_combinations)} Training with {params}", end="")
-        model = train_agent(env_id, hand_type, total_timesteps=timesteps_per_param, param_dict=params, verbose=0, provided_envs=envs)
+        model = train_agent(env_id, hand_type, task_type, total_timesteps=timesteps_per_param, param_dict=params, verbose=0, provided_envs=envs)
         env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
         mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=25, deterministic=True)
         del model

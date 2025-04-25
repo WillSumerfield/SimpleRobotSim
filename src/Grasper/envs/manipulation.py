@@ -15,12 +15,12 @@ HPI = np.pi/2
 DOME_PRECISION = 12
 
 
-def get_rect_vertices(size):
+def get_rect_vertices(size, offset=(0, 0)):
     return [
-        (0, 0),
-        (0, size[1]),
-        (size[0], size[1]),
-        (size[0], 0)
+        (offset[0], offset[1]),
+        (size[0] + offset[0], offset[1]),
+        (size[0] + offset[0], size[1] + offset[1]),
+        (offset[0], size[1] + offset[1])
     ]
 
 def rotate_vertices(vertices: np.ndarray, angle: float):
@@ -221,6 +221,8 @@ class Object():
         dome   = 2
         sheet  = 3
         cross  = 4
+        elbow  = 5
+        pivot  = 6
 
     COLOR = (255, 0, 0)
     SIZE = 48
@@ -234,7 +236,7 @@ class Object():
     SHEET_MOI = pymunk.moment_for_box(MASS, (SIZE*2, SHEET_HEIGHT))
     DOME_VERTICES = get_dome_vertices(SIZE/2)
     DOME_MOI = pymunk.moment_for_poly(MASS, DOME_VERTICES)
-    CROSS_WIDTH = SIZE/8
+    CROSS_WIDTH = SIZE/6
     CROSS_MOI = 2*pymunk.moment_for_box(MASS/2, (SIZE, CROSS_WIDTH))
 
 
@@ -251,27 +253,35 @@ class Object():
             self._shape = pymunk.Circle(self._body, self.SIZE/2)
         elif self._type == self.ObjectTypes.square.value:
             self._body = pymunk.Body(1, self.SQUARE_MOI, body_type=pymunk.Body.DYNAMIC)
-            self._shape = pymunk.Poly.create_box(self._body, (self.SIZE, self.SIZE))
+            self._shape = pymunk.Poly(self._body, get_rect_vertices((self.SIZE, self.SIZE), offset=(-self.SIZE/2, -self.SIZE/2)))
         elif self._type == self.ObjectTypes.dome.value:
-            self._body = pymunk.Body(1, self.CROSS_MOI, body_type=pymunk.Body.DYNAMIC)
+            self._body = pymunk.Body(1, self.DOME_MOI, body_type=pymunk.Body.DYNAMIC)
             self._shape = pymunk.Poly(self._body, self.DOME_VERTICES)
         elif self._type == self.ObjectTypes.sheet.value:
             self._body = pymunk.Body(1, self.SHEET_MOI, body_type=pymunk.Body.DYNAMIC)
             self._shape = pymunk.Poly.create_box(self._body, (self.SIZE*2, self.SHEET_HEIGHT))
-        else: # Cross
+        elif self._type == self.ObjectTypes.cross.value:
             self._body = pymunk.Body(1, self.CROSS_MOI, body_type=pymunk.Body.DYNAMIC)
             self._shape = pymunk.Poly.create_box(self._body, (self.SIZE, self.CROSS_WIDTH))
             self._shape2 = pymunk.Poly.create_box(self._body, (self.CROSS_WIDTH, self.SIZE))
-            self._shape2.angle = np.pi/2
-            self._shape2.friction = self.FRICTION
-            self._shape2.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
+        elif self._type == self.ObjectTypes.elbow.value:
+            self._body = pymunk.Body(1, self.CROSS_MOI, body_type=pymunk.Body.DYNAMIC)
+            _offset = -(self.CROSS_WIDTH+self.SIZE)/2
+            self._shape = pymunk.Poly(self._body, get_rect_vertices((self.CROSS_WIDTH, self.SIZE), offset=(_offset, _offset)))
+            self._shape2 = pymunk.Poly(self._body, get_rect_vertices((self.SIZE, self.CROSS_WIDTH), offset=(_offset, _offset)))
+        else: # pivot
+            self._body = pymunk.Body(1, self.CROSS_MOI, body_type=pymunk.Body.DYNAMIC)
+            self._shape = pymunk.Poly(self._body, get_rect_vertices((self.CROSS_WIDTH, self.SIZE), offset=(-self.CROSS_WIDTH/2, -self.SIZE/4)))
+            self._shape2 = pymunk.Poly(self._body, get_rect_vertices((self.SIZE, self.CROSS_WIDTH), offset=(-self.SIZE/2, -self.CROSS_WIDTH/2-self.SIZE/4)))
 
         # Set the object's properties
         self._body.position = ((WINDOW_SIZE[0]-2*self.SPAWN_X_BUFFER)*rng.random(dtype=float) + self.SPAWN_X_BUFFER, FLOOR_Y+self.SIZE/2)
         self._shape.friction = self.FRICTION
         self._shape.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
 
-        if self._type == self.ObjectTypes.cross.value:
+        if self._type in [self.ObjectTypes.cross.value, self.ObjectTypes.elbow.value, self.ObjectTypes.pivot.value]:
+            self._shape2.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
+            self._shape2.friction = self.FRICTION
             space.add(self._body, self._shape, self._shape2)
         else:
             space.add(self._body, self._shape)
@@ -290,21 +300,11 @@ class Object():
                                self.COLOR,
                                self._body.position,
                                self.SIZE/2)
-        elif self._type == self.ObjectTypes.square.value:
+        elif self._type in [self.ObjectTypes.square.value, self.ObjectTypes.dome.value, self.ObjectTypes.sheet.value]:
             pygame.draw.polygon(canvas,
                                 self.COLOR,
-                                np.array([self._body.position]) +
-                                rotate_vertices(np.array(get_rect_vertices((self.SIZE, self.SIZE)) - np.array([self.SIZE/2, self.SIZE/2])), self._body.angle))
-        elif self._type == self.ObjectTypes.dome.value:
-            pygame.draw.polygon(canvas,
-                                self.COLOR,
-                                np.array([self._body.position]) + rotate_vertices(self.DOME_VERTICES, self._body.angle))
-        elif self._type == self.ObjectTypes.sheet.value:
-            pygame.draw.polygon(canvas,
-                                self.COLOR,
-                                np.array([self._body.position]) + 
-                                rotate_vertices(np.array(get_rect_vertices((self.SIZE*2, self.SHEET_HEIGHT)) - np.array([self.SIZE, self.SHEET_HEIGHT/2])), self._body.angle))
-        else: # Cross
+                                np.array([self._body.position]) + rotate_vertices(self._shape.get_vertices(), self._body.angle))
+        else: # cross, elbow, pivot
             pygame.draw.polygon(canvas,
                                 self.COLOR,
                                 np.array([self._body.position]) + rotate_vertices(self._shape.get_vertices(), self._body.angle))
