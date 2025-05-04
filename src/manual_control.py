@@ -9,13 +9,18 @@ from pynput import keyboard
 import Grasper
 from Grasper.wrappers import BetterExploration
 from key_checks import key_presses, get_actions, on_press, on_release
-from hand_morphologies import HAND_TYPES
+from hand_morphologies import HAND_TYPES, unnorm_hand_params
 
 
-def manual_control(env, hand_type, task_type):
+def manual_control(env, hand_type, task_type, ga_index):
     global key_presses
 
-    options = {"hand_parameters": HAND_TYPES[hand_type], "object_type": task_type}
+    if ga_index is not None:
+        raw_params = np.load(f"checkpoints/genetic_algorithm/{ga_index}/hand_params.npy")
+        hand_parameters = unnorm_hand_params(raw_params.copy())
+    else:
+        hand_parameters = HAND_TYPES[hand_type]
+    options = {"hand_parameters": hand_parameters, "object_type": task_type}
 
     env = gym.make(env, render_mode="human")
     env = BetterExploration(env)
