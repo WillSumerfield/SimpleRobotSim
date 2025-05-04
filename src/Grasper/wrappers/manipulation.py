@@ -13,7 +13,7 @@ PI2 = np.pi * 2
 class BetterExploration(gym.Wrapper):
 
     CLOSED_PERCENTAGE = 0.3
-    DIGIT_LENGTH_PERCENTAGE = 0.3
+    DIGIT_LENGTH_PERCENTAGE = 0.4
 
     def __init__(self, env):
         super().__init__(env)
