@@ -30,6 +30,7 @@ from stable_baselines3.common.buffers import RolloutBuffer
 
 from Grasper.wrappers import BetterExploration, HandParams, TaskType
 from baseline import BASELINE_PATH, load_baseline
+from hand_morphologies import unnorm_hand_params
 
 
 CPU_COUNT = os.cpu_count()-4
@@ -45,13 +46,14 @@ PPO_ARGS = {"learning_rate": 1e-3, "policy_kwargs": POLICY_ARGS, "verbose": 1, "
 PARAM_DICT = {"gamma": [0.98], "ent_coef": [0.01, 0.1]}
 
 
-def _make_env(env_id, hand_type, task_type, record=False):
+def _make_env(env_id, hand_type, task_type, ga_index=None, record=False):
     if not record:
         env = gym.make(env_id)
     else:
         env = gym.make(env_id, render_mode="rgb_array")
     env = BetterExploration(env)
-    env = HandParams(env, hand_type)
+    if ga_index is None:
+        env = HandParams(env, hand_type)
     if task_type is not None:
         env = TaskType(env, task_type)
     env = gym.wrappers.FlattenObservation(env)
@@ -59,10 +61,13 @@ def _make_env(env_id, hand_type, task_type, record=False):
     if not record:
         check_env(env)
     else:
-        if task_type is None:
-            video_folder = f"{VIDEOS_FOLDER}/hand_type_{hand_type}"
+        if ga_index is not None:
+            video_folder = f"{VIDEOS_FOLDER}/genetic_algorithm/{ga_index}"
         else:
-            video_folder = f"{VIDEOS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
+            if task_type is None:
+                video_folder = f"{VIDEOS_FOLDER}/hand_type_{hand_type}"
+            else:
+                video_folder = f"{VIDEOS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
         env = gym.wrappers.RecordVideo(env, video_folder=video_folder, episode_trigger=lambda x: True, disable_logger=True)
     return env
 
@@ -225,7 +230,8 @@ class DAPG(PPO):
         args = {key: value for key, value in PPO_ARGS.items() if key not in kwargs}
         if "policy" not in kwargs:
             args["policy"] = MultiTaskMlpPolicy
-        args["policy_kwargs"]["task_count"] = kwargs["env"].get_attr("OBJECT_TYPES")[0]
+        if "verbose" not in kwargs:
+            args["verbose"] = 0 # Stupid fix to bug in stable_baselines3
         super().__init__(**{**args, **kwargs})
         self.baseline_policy = load_baseline(device=self.device, verbose=self.verbose)
         self.baseline_policy.eval()
@@ -503,7 +509,7 @@ class DAPG(PPO):
         # self.env.set_options({"subtask_distribution": self.subtask_distribution})
 
         return True
-    
+
     def _update_info_buffer(self, infos: list[dict[str, Any]], dones: Optional[np.ndarray] = None) -> None:
         assert self.ep_info_buffer is not None
         assert self.ep_success_buffer is not None
@@ -704,15 +710,18 @@ def convert_to_baseline(env_id, hand_type, task_type, checkpoint=True):
     print(f"Baseline model saved to {BASELINE_PATH}")
 
 
-def get_video(env_id, hand_type, task_type):
+def get_video(env_id, hand_type, task_type, ga_index):
 
     # Load the model
-    if task_type is None:
-        model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
+    if ga_index is not None:
+        model_path = f"{CHECKPOINTS_FOLDER}/genetic_algorithm/{ga_index}/model.zip"
     else:
-        model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
+        if task_type is None:
+            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
+        else:
+            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
 
-    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type, ga_index=ga_index), n_envs=1, vec_env_cls=DummyVecEnv)
 
     # Load model
     print(f"Loading model from {model_path}")
@@ -721,11 +730,21 @@ def get_video(env_id, hand_type, task_type):
     ppo_args["policy_kwargs"]["task_count"] = task_count
     model = DAPG.load(env=env, path=model_path, **ppo_args, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
 
+    # If using a genetic algorithm, load the specified hand params
+    if ga_index is not None:
+        raw_params = np.load(f"{CHECKPOINTS_FOLDER}/genetic_algorithm/{ga_index}/hand_params.npy")
+        hand_params = unnorm_hand_params(raw_params.copy())
+        print(f"Norm. Params: {raw_params}")
+        print("Hand Params: ", hand_params.segment_lengths, hand_params.joint_angle, hand_params.rotation_max)
+
     # Render the environment
     gym.logger.min_level = logging.ERROR
-    env = _make_env(env_id, hand_type, task_type, record=True)
+    env = _make_env(env_id, hand_type, task_type, ga_index=ga_index, record=True)
     obj_type = 0 if task_type is None else task_type
-    obs, info = env.reset(options={"object_type": obj_type})
+    options = {"object_type": obj_type}
+    if ga_index is not None:
+        options["hand_parameters"] = hand_params
+    obs, info = env.reset(options=options)
     while True: # Loop until the user is satified with the video
         episodes = 1
         while True:
@@ -744,7 +763,7 @@ def get_video(env_id, hand_type, task_type):
         # Ask the user if they want regenerate the video
         while True:
             obj_type = 0 if task_type is None else task_type
-            obs, info = env.reset(options={"object_type": obj_type})
+            obs, info = env.reset(options=options)
             user_input = input("Do you want to generate a new video? (y/n): ").strip().lower()
             if user_input == 'y':
                 break
