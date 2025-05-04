@@ -116,14 +116,14 @@ class Hand():
         # Digit upper segments
         self._segment_ul_body = pymunk.Body(self.SEGMENT_MASS, segment_mois[0], body_type=pymunk.Body.DYNAMIC)
         self._segment_ul_body.position = self._hinge.position + (self.SEGMENT_OFFSET * np.array([-1, -1]))
-        self._segment_ul_body.angle = self.parameters.rotation_max
+        self._segment_ul_body.angle = self.MIN_ANGLE
         self._segment_ul = pymunk.Poly(self._segment_ul_body, self.segment_vertices[0])
         self._segment_ul.friction = self.SEGMENT_FRICTION
         self._segment_ul.filter = self.SEGMENT_L_COLLISION_FILTER
         space.add(self._segment_ul_body, self._segment_ul)
         self._segment_ur_body = pymunk.Body(self.SEGMENT_MASS, segment_mois[1], body_type=pymunk.Body.DYNAMIC)
         self._segment_ur_body.position = self._hinge.position + (self.SEGMENT_OFFSET * np.array([1, -1]))
-        self._segment_ur_body.angle = -self.parameters.rotation_max
+        self._segment_ur_body.angle = -self.MIN_ANGLE
         self._segment_ur = pymunk.Poly(self._segment_ur_body, self.segment_vertices[1])
         self._segment_ur.friction = self.SEGMENT_FRICTION
         self._segment_ur.filter = self.SEGMENT_R_COLLISION_FILTER
@@ -348,6 +348,9 @@ class ManipulationEnv(gym.Env):
         # The distribution of subtasks
         self.subtask_distribution = [1/self.OBJECT_TYPES]*self.OBJECT_TYPES # Uniform distribution
 
+        # Only needs to be set when changing the hand parameters
+        self.hand_parameters = None
+
         self._action_to_direction = {
             MoveActions.none.value:  np.array([0,  0]),
             MoveActions.right.value: np.array([1,  0]),
@@ -394,6 +397,8 @@ class ManipulationEnv(gym.Env):
         if options is None:
             options = {}
         hand_parameters = options.get("hand_parameters", None)
+        if hand_parameters is not None:
+            self.hand_parameters = hand_parameters
         object_type = options.get("object_type", None)
         self.subtask_distribution = options.get("subtask_distribution", self.subtask_distribution)
         if object_type is None: # Use the distribution when object type is not provided.
@@ -407,7 +412,7 @@ class ManipulationEnv(gym.Env):
 
         # Add the objects to the physical space
         self._floor = Floor(self._space)
-        self._hand = Hand(self._space, self.np_random, parameters=hand_parameters)
+        self._hand = Hand(self._space, self.np_random, parameters=self.hand_parameters)
         self._object = Object(self._space, self.np_random, obj_type=object_type)
 
         self._target_position = np.array([((WINDOW_SIZE[0] - 2*self._object.SIZE)*self.np_random.random(dtype=float)) + self._object.SIZE, 
