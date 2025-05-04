@@ -86,8 +86,6 @@ def load_baseline(device, verbose=True):
         raise FileNotFoundError("No saved model or checkpoints found.")
 
     # Load model
-    if verbose:
-        print(f"Loading baseline from {BASELINE_PATH}")
     model = torch.load(BASELINE_PATH, weights_only=False)
     model.to(device)
     model.eval()
