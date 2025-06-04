@@ -53,7 +53,19 @@ HAND_PARAM_MAXS = np.array([128,             # Segment lengths
 HAND_PARAM_MEANS = (HAND_PARAM_MINS + HAND_PARAM_MAXS) / 2.0
 HAND_PARAM_STDS = (HAND_PARAM_MAXS - HAND_PARAM_MINS) / 6.0  # Limits are 3 stds away from the mean
 
+
+def norm_hand_params(hand_parameters: Hand.Parameters) -> np.ndarray:
+    hand_parameters = np.concatenate([hand_parameters.segment_lengths,
+                                      hand_parameters.joint_angle,
+                                      np.array([hand_parameters.rotation_max])])
+    hand_parameters[0:4] = (hand_parameters[0:4] - HAND_PARAM_MEANS[0]) / HAND_PARAM_STDS[0]  # Segment lengths
+    hand_parameters[4:6] = (hand_parameters[4:6] - HAND_PARAM_MEANS[1]) / HAND_PARAM_STDS[1]  # Joint angles
+    hand_parameters[6]   = (hand_parameters[6]   - HAND_PARAM_MEANS[2]) / HAND_PARAM_STDS[2]  # Rotation Max
+    return hand_parameters
+
+
 def unnorm_hand_params(hand_parameters: np.ndarray) -> Hand.Parameters:
+    hand_parameters = hand_parameters.copy()
     hand_parameters[0:4] = np.clip(hand_parameters[0:4]*HAND_PARAM_STDS[0] + HAND_PARAM_MEANS[0], HAND_PARAM_MINS[0], HAND_PARAM_MAXS[0]) # Segment lengths
     hand_parameters[4:6] = np.clip(hand_parameters[4:6]*HAND_PARAM_STDS[1] + HAND_PARAM_MEANS[1], HAND_PARAM_MINS[1], HAND_PARAM_MAXS[1]) # Joint angles
     hand_parameters[6]   = np.clip(hand_parameters[6]*HAND_PARAM_STDS[2]   + HAND_PARAM_MEANS[2], HAND_PARAM_MINS[2], HAND_PARAM_MAXS[2]) # Rotation Max
