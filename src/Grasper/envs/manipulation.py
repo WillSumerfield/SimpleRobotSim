@@ -88,8 +88,8 @@ class Hand():
 
 
     def __init__(self, space, rng, parameters=None):
-        position = ((np.array([WINDOW_SIZE[0], WINDOW_SIZE[1]-self.MIN_Y_SPAWN]) * rng.random(2, dtype=float)) \
-                    + np.array([0, self.MIN_Y_SPAWN])).tolist()
+        position = (rng.random()*WINDOW_SIZE[0], self.MIN_Y_SPAWN)#((np.array([WINDOW_SIZE[0], WINDOW_SIZE[1]-self.MIN_Y_SPAWN]) * rng.random(2, dtype=float)) \
+                   #+ np.array([0, self.MIN_Y_SPAWN])).tolist()
         
         if parameters is None:
             parameters = self.DEFAULT_PARAMETERS
@@ -275,7 +275,7 @@ class Object():
             self._shape2 = pymunk.Poly(self._body, get_rect_vertices((self.SIZE, self.CROSS_WIDTH), offset=(-self.SIZE/2, -self.CROSS_WIDTH/2-self.SIZE/4)))
 
         # Set the object's properties
-        self._body.position = ((WINDOW_SIZE[0]-2*self.SPAWN_X_BUFFER)*rng.random(dtype=float) + self.SPAWN_X_BUFFER, FLOOR_Y+self.SIZE/2)
+        self._body.position = (WINDOW_SIZE[0]/2, FLOOR_Y+self.SIZE/2) #((WINDOW_SIZE[0]-2*self.SPAWN_X_BUFFER)*rng.random(dtype=float) + self.SPAWN_X_BUFFER, FLOOR_Y+self.SIZE/2)
         self._shape.friction = self.FRICTION
         self._shape.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
 
@@ -320,8 +320,9 @@ class ManipulationEnv(gym.Env):
     GOAL_ROTATION = 0.1
     GRAVITY = -256
     PHYSICS_TIMESTEP = 1/50
-    TARGET_Y_BUFFER = 32
-    MAX_TIME = 250
+    TARGET_Y_MAX_BUFFER = 96
+    TARGET_Y_MIN_BUFFER = 48
+    MAX_TIME = 150
 
     AGENT_SPACE = 4 # x, y, digit_angle1, digit_angle2
     OBJECT_SPACE = 3 # x, y, angle
@@ -416,8 +417,7 @@ class ManipulationEnv(gym.Env):
         self._object = Object(self._space, self.np_random, obj_type=object_type)
 
         self._target_position = np.array([((WINDOW_SIZE[0] - 2*self._object.SIZE)*self.np_random.random(dtype=float)) + self._object.SIZE, 
-                                          ((WINDOW_SIZE[1] - 2*self._object.SIZE - self._hand.MIN_Y_SPAWN - self.TARGET_Y_BUFFER)*self.np_random.random(dtype=float)) + 
-                                            self._object.SIZE + self._hand.MIN_Y_SPAWN,
+                                          ((WINDOW_SIZE[1] - 2*self._object.SIZE - self.TARGET_Y_MAX_BUFFER)*self.np_random.random(dtype=float)) + self._object.SIZE + self.TARGET_Y_MIN_BUFFER,
                                             self.np_random.uniform(-np.pi, np.pi)])
         self._obs_target_position = self._target_position / np.array([WINDOW_SIZE[0], WINDOW_SIZE[1], np.pi])
 
@@ -443,7 +443,7 @@ class ManipulationEnv(gym.Env):
         # Check if goal is reached
         goal_dist = np.linalg.norm(np.array([self._object._body.position]) - self._target_position[:2])
         goal_angle_dist = 0 #np.abs(self._object._body.angle - self._target_position[2])
-        terminated = bool((goal_dist <= self.GOAL_RADIUS) and (goal_angle_dist <= self.GOAL_ROTATION))
+        terminated = False# bool((goal_dist <= self.GOAL_RADIUS) and (goal_angle_dist <= self.GOAL_ROTATION))
 
         reward = 100 if terminated else (-20 if obj_outofbounds else -1)
         observation = self._get_obs()
@@ -473,7 +473,7 @@ class ManipulationEnv(gym.Env):
         self._floor.draw(canvas)
         self._object.draw(canvas)
         self._hand.draw(canvas)
-        pygame.draw.circle(canvas, (0, 255, 0), self._target_position[:2], self.GOAL_RADIUS)
+        #pygame.draw.circle(canvas, (0, 255, 0), self._target_position[:2], self.GOAL_RADIUS)
 
         inv_canvas = pygame.transform.flip(canvas, False, True) # Invert Y
         if self.render_mode == "human":

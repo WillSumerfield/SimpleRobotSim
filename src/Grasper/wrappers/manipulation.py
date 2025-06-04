@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 import pygame
 
-from Grasper.envs.manipulation import WINDOW_SIZE, Object
+from Grasper.envs.manipulation import WINDOW_SIZE, FLOOR_Y, Object
 from hand_morphologies import HAND_TYPES
 
 
@@ -14,6 +14,8 @@ class BetterExploration(gym.Wrapper):
 
     CLOSED_PERCENTAGE = 0.3
     DIGIT_LENGTH_PERCENTAGE = 0.4
+    DISTANCE_SCALAR = 5
+
 
     def __init__(self, env):
         super().__init__(env)
@@ -46,26 +48,32 @@ class BetterExploration(gym.Wrapper):
         # Use more iterative rewards to enable better exploration
         hand_pos = obs[self._subtask_count:self._subtask_count+4]
         obj_pos = obs[self._subtask_count+4:self._subtask_count+7]
-        target_pos = obs[self._subtask_count+7:self._subtask_count+10]
+        #target_pos = obs[self._subtask_count+7:self._subtask_count+10]
         dist_to_obj = np.sqrt(obj_pos[0]**2 + (obj_pos[1]*self._xy_ratio)**2) / SQ2
-        dist_to_target = np.sqrt(target_pos[0]**2 + (target_pos[1]*self._xy_ratio)**2) / SQ2
+        #dist_to_target = np.sqrt(target_pos[0]**2 + (target_pos[1]*self._xy_ratio)**2) / SQ2
         self._near_target = np.abs(dist_to_obj) < self._max_dist
         self._closed_hand = hand_pos[2] > self._closed_angle and hand_pos[3] < -self._closed_angle
+        self._obj_off_ground = self.env.unwrapped._object._body.position[1] > (self.env.unwrapped._object.SIZE + FLOOR_Y)
 
-        # If the object has the target, reward the agent for moving the object to the target
-        if self._near_target:
-            if self._closed_hand:
-                reward = (1-dist_to_target)**2
-            else:
-                reward = -0.1
-        # If the hand is not near the object, reward the agent for moving the hand to the object
-        else:
-            if action[2] == 1:
-                reward = -dist_to_obj
-            else:
-                reward = -1
-        if terminated:
-            reward = 1000 + (self.env.unwrapped.MAX_TIME - self.env.unwrapped._elapsed_steps)
+        # # If the object has the target, reward the agent for moving the object to the target
+        # if self._near_target:
+        #     if self._obj_off_ground:
+        #         reward = 0.25#self.DISTANCE_SCALAR * (1-dist_to_target)**2
+        #     else:
+        #         reward = 0 if self._closed_hand else -0.1
+        # # If the hand is not near the object, reward the agent for moving the hand to the object
+        # else:
+        #     if action[2] == 1:
+        #         reward = -dist_to_obj
+        #     else:
+        #         reward = -1
+        # If it reaches the goal, act like it stayed at the perfect position the rest of the time
+        # if terminated:
+        #     reward = self.DISTANCE_SCALAR*(self.env.unwrapped.MAX_TIME - self.env.unwrapped._elapsed_steps)
+
+        # Reward direct distance to the object and being off ground
+        reward = (1-dist_to_obj)**3 + self._obj_off_ground*0.5
+
         self._total_reward += reward
 
         # Track the subtask performance at the end of the episode
