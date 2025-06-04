@@ -26,7 +26,7 @@ MORPHOLOGY_SAVE_PATH = "morphologies/"
 CHECKPOINTS_FOLDER = "checkpoints/genetic_algorithm"
 LOGS_FOLDER = "training_logs/genetic_algorithm"
 DIAGRAMS_FOLDER = "diagrams/genetic_algorithm"
-MODEL_NAME = "model.zip"
+MODEL_NAME = "policy.zip"
 HAND_PARAM_NAME = "hand_params.npy"
 
 
