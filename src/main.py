@@ -8,11 +8,12 @@ from agent import train_agent, test_agent, param_sweep, convert_to_baseline, get
 from demo import provide_demos, play_demos
 from baseline import train_baseline, test_baseline
 from genetic_algorithm import evolve_hands
+from perterbation_testing import perterbation_testing
 
 
 def main():
     parser = argparse.ArgumentParser(description="Simple Robot Simulator")
-    parser.add_argument("mode", choices=["genetic-algorithm",
+    parser.add_argument("mode", choices=["perterbation-test", "genetic-algorithm",
                                          "test-agent", "train-agent", "param-sweep-agent",
                                          "manual", "demo", "get-video",
                                          "train-baseline", "test-baseline", "convert-to-baseline"], 
@@ -26,6 +27,7 @@ def main():
     parser.add_argument("--task-type", type=int, help="The index of the subtask to train/test on. Defaults to all objects.", default=None)
     parser.add_argument("--use-model", action="store_true", help="Use the model as opposed to a checkpoint to test.")
     parser.add_argument("--ga", type=int, help="The individual index # of the Genetic Algorithm to view/test", default=None)
+    parser.add_argument("--pt", type=int, help="The permutation iteration # to view", default=None)
     args = parser.parse_args()
 
     if args.env == "manipulation":
@@ -34,7 +36,10 @@ def main():
     if args.mode == "genetic-algorithm":
         evolve_hands(args.env, args.task_type)
 
-    if args.mode == "test-agent":
+    if args.mode == "perterbation-test":
+        perterbation_testing(args.env, args.hand_type, args.task_type)
+
+    elif args.mode == "test-agent":
         test_agent(args.env, args.hand_type, args.task_type, checkpoint=(not args.use_model))
         
     elif args.mode == "train-agent":
@@ -53,7 +58,7 @@ def main():
             provide_demos(args.env, args.hand_type, args.task_type)
 
     elif args.mode == "get-video":
-        get_video(args.env, args.hand_type, args.task_type, args.ga)
+        get_video(args.env, args.hand_type, args.task_type, args.ga, args.pt)
     
     elif args.mode == "train-baseline":
         train_baseline(args.env, args.demo_index)

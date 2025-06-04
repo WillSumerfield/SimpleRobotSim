@@ -41,18 +41,18 @@ VIDEOS_FOLDER = "./videos"
 LOGS_FOLDER = "./training_logs"
 MODEL_FOLDER = "./models"
 POLICY_ARGS = {"net_arch": [64, 64], "activation_fn": torch.nn.ReLU, "optimizer_class": torch.optim.Adam}
-PPO_ARGS = {"learning_rate": 1e-3, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
-            "ent_coef": 0.01, "gamma": 0.98, "n_epochs": 5}
+PPO_ARGS = {"learning_rate": 1e-4, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
+            "ent_coef": 0.01, "gamma": 0.98, "n_epochs": 10}
 PARAM_DICT = {"gamma": [0.98], "ent_coef": [0.01, 0.1]}
 
 
-def _make_env(env_id, hand_type, task_type, ga_index=None, record=False):
+def _make_env(env_id, hand_type, task_type, ga_index=None, pt_index=None, record=False):
     if not record:
         env = gym.make(env_id)
     else:
         env = gym.make(env_id, render_mode="rgb_array")
     env = BetterExploration(env)
-    if ga_index is None:
+    if ga_index is None and pt_index is None:
         env = HandParams(env, hand_type)
     if task_type is not None:
         env = TaskType(env, task_type)
@@ -63,6 +63,8 @@ def _make_env(env_id, hand_type, task_type, ga_index=None, record=False):
     else:
         if ga_index is not None:
             video_folder = f"{VIDEOS_FOLDER}/genetic_algorithm/{ga_index}"
+        elif pt_index is not None:
+            video_folder = f"{VIDEOS_FOLDER}/permutation_testing/hand_type_{hand_type}_task_{task_type}/{pt_index}"
         else:
             if task_type is None:
                 video_folder = f"{VIDEOS_FOLDER}/hand_type_{hand_type}"
@@ -238,7 +240,7 @@ class DAPG(PPO):
         for param in self.baseline_policy.parameters():
             param.requires_grad = False
 
-        self.lambda_bc_init = 0.3
+        self.lambda_bc_init = 0.1
         self.lambda_bc_decay = 0.98
         self.task_count = self.env.get_attr("OBJECT_TYPES")[0]
         self.subtask_distribution = None
@@ -544,7 +546,7 @@ class DAPG(PPO):
         return (value_loss - self.subtask_value_mu[subtask_id]) / self.subtask_value_sigma[subtask_id]
 
 
-def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=1.5e7, param_dict=dict(), verbose=1, provided_envs=None):
+def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=2e6, param_dict=dict(), verbose=1, provided_envs=None):
     if provided_envs is None:
         envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
     else:
@@ -574,6 +576,7 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
         tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
     
     # Load or create model
+    task_count = envs.get_attr("OBJECT_TYPES")[0]
     if continue_training:
         checkpoint_files = glob.glob(f"{checkpoint_folder}/{CHECKPOINT_NAME}_*.zip")
         if not checkpoint_files:
@@ -582,11 +585,15 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
         ppo_args = PPO_ARGS.copy()
         ppo_args["verbose"] = verbose
         ppo_args["tensorboard_log"] = tensorboard_log
-        ppo_args["policy_kwargs"]["task_count"] = envs.get_attr("OBJECT_TYPES")[0]
+        ppo_args["policy_kwargs"]["task_count"] = task_count
         print(f"Loading model from {latest_checkpoint}.")
         model = DAPG.load(path=latest_checkpoint, env=envs, **ppo_args, kwargs=param_dict)
     else:
-        model = DAPG(env=envs, **param_dict, verbose=verbose, tensorboard_log=tensorboard_log)
+        ppo_args = PPO_ARGS.copy()
+        ppo_args["verbose"] = verbose
+        ppo_args["tensorboard_log"] = tensorboard_log
+        ppo_args["policy_kwargs"]["task_count"] = task_count
+        model = DAPG(env=envs, **param_dict, **ppo_args)
 
     # Train model
     model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, eval_callback, subtask_reward_callback])
@@ -594,7 +601,7 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
     return model
 
 
-def test_agent(env_id, hand_type, task_type, n_eval_episodes=100, n_displayed_episodes=5, checkpoint=True):
+def test_agent(env_id, hand_type, task_type, n_eval_episodes=500, n_displayed_episodes=5, checkpoint=True):
 
     # Find latest checkpoint
     if checkpoint:
@@ -710,39 +717,48 @@ def convert_to_baseline(env_id, hand_type, task_type, checkpoint=True):
     print(f"Baseline model saved to {BASELINE_PATH}")
 
 
-def get_video(env_id, hand_type, task_type, ga_index):
+def get_video(env_id, hand_type, task_type, ga_index, pt_index):
+
+    iteration_path = None
+    if ga_index is not None:
+        iteration_path = f"genetic_algorithm/{ga_index}"
+    elif pt_index is not None:
+        iteration_path = f"permutation_testing/hand_type_{hand_type}_task_{task_type}/{pt_index}"
+    elif ga_index is not None and pt_index is not None:
+        raise ValueError("Cannot specify both ga_index and pt_index.")
+
 
     # Load the model
-    if ga_index is not None:
-        model_path = f"{CHECKPOINTS_FOLDER}/genetic_algorithm/{ga_index}/model.zip"
+    if iteration_path is not None:
+        model_path = f"{MODEL_FOLDER}/{iteration_path}/policy"
     else:
         if task_type is None:
             model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
         else:
             model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
 
-    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type, ga_index=ga_index), n_envs=1, vec_env_cls=DummyVecEnv)
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type, ga_index=ga_index, pt_index=pt_index), n_envs=1, vec_env_cls=DummyVecEnv)
 
     # Load model
     print(f"Loading model from {model_path}")
     ppo_args = PPO_ARGS.copy()
     task_count = env.get_attr("OBJECT_TYPES")[0]
     ppo_args["policy_kwargs"]["task_count"] = task_count
-    model = DAPG.load(env=env, path=model_path, **ppo_args, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
+    model = DAPG.load(env=env, path=model_path, **ppo_args)
 
-    # If using a genetic algorithm, load the specified hand params
-    if ga_index is not None:
-        raw_params = np.load(f"{CHECKPOINTS_FOLDER}/genetic_algorithm/{ga_index}/hand_params.npy")
+    # If using a genetic algorithm or permutation testing, load the specified hand params
+    if iteration_path is not None:
+        raw_params = np.load(f"{MODEL_FOLDER}/{iteration_path}/hand_params.npy")
         hand_params = unnorm_hand_params(raw_params.copy())
         print(f"Norm. Params: {raw_params}")
         print("Hand Params: ", hand_params.segment_lengths, hand_params.joint_angle, hand_params.rotation_max)
 
     # Render the environment
     gym.logger.min_level = logging.ERROR
-    env = _make_env(env_id, hand_type, task_type, ga_index=ga_index, record=True)
+    env = _make_env(env_id, hand_type, task_type, ga_index=ga_index, pt_index=pt_index, record=True)
     obj_type = 0 if task_type is None else task_type
     options = {"object_type": obj_type}
-    if ga_index is not None:
+    if iteration_path is not None:
         options["hand_parameters"] = hand_params
     obs, info = env.reset(options=options)
     while True: # Loop until the user is satified with the video
