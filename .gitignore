@@ -3,6 +3,7 @@ checkpoints
 videos
 training_logs
 models
+photos
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

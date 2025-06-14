@@ -4,7 +4,7 @@ Users can play the Grasper environments, train a new agent, or test the current 
 import argparse
 
 from manual_control import manual_control
-from agent import train_agent, test_agent, param_sweep, convert_to_baseline, get_video
+from agent import train_agent, test_agent, param_sweep, convert_to_baseline, get_video, get_photo
 from demo import provide_demos, play_demos
 from baseline import train_baseline, test_baseline
 from genetic_algorithm import evolve_hands
@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description="Simple Robot Simulator")
     parser.add_argument("mode", choices=["perterbation-test", "genetic-algorithm",
                                          "test-agent", "train-agent", "param-sweep-agent",
-                                         "manual", "demo", "get-video",
+                                         "manual", "demo", "get-video", "get-photo",
                                          "train-baseline", "test-baseline", "convert-to-baseline"], 
                                          help="Mode of operation")
     parser.add_argument("env", choices=["manipulation", "claw_game"], help="Mode of operation")
@@ -59,6 +59,9 @@ def main():
 
     elif args.mode == "get-video":
         get_video(args.env, args.hand_type, args.task_type, args.ga, args.pt)
+
+    elif args.mode == "get-photo":
+        get_photo(args.env, args.hand_type, args.task_type, args.ga, args.pt)
     
     elif args.mode == "train-baseline":
         train_baseline(args.env, args.demo_index)

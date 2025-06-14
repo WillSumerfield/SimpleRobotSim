@@ -8,6 +8,7 @@ import logging
 from typing import Optional, Callable, Any
 from itertools import product
 from functools import partial
+from PIL import Image
 
 import numpy as np
 import torch
@@ -38,29 +39,32 @@ REWARD_THRESHOLD = 1000
 CHECKPOINTS_FOLDER = "./checkpoints"
 CHECKPOINT_NAME = "ppo_grasper"
 VIDEOS_FOLDER = "./videos"
+PHOTOS_FOLDER = "./photos"
 LOGS_FOLDER = "./training_logs"
 MODEL_FOLDER = "./models"
 POLICY_ARGS = {"net_arch": [64, 64], "activation_fn": torch.nn.ReLU, "optimizer_class": torch.optim.Adam}
 PPO_ARGS = {"learning_rate": 1e-4, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
             "ent_coef": 0.01, "gamma": 0.98, "n_epochs": 10}
 PARAM_DICT = {"gamma": [0.98], "ent_coef": [0.01, 0.1]}
+PHOTO_FRAME = 15
 
 
-def _make_env(env_id, hand_type, task_type, ga_index=None, pt_index=None, record=False):
-    if not record:
+def _make_env(env_id, hand_type, task_type, ga_index=None, pt_index=None, render=False, record=False, better_exploration=True):
+    if not render:
         env = gym.make(env_id)
     else:
         env = gym.make(env_id, render_mode="rgb_array")
-    env = BetterExploration(env)
+    if better_exploration:
+        env = BetterExploration(env)
     if ga_index is None and pt_index is None:
         env = HandParams(env, hand_type)
     if task_type is not None:
         env = TaskType(env, task_type)
     env = gym.wrappers.FlattenObservation(env)
     env = Monitor(env)
-    if not record:
+    if not render:
         check_env(env)
-    else:
+    elif record:
         if ga_index is not None:
             video_folder = f"{VIDEOS_FOLDER}/genetic_algorithm/{ga_index}"
         elif pt_index is not None:
@@ -546,7 +550,7 @@ class DAPG(PPO):
         return (value_loss - self.subtask_value_mu[subtask_id]) / self.subtask_value_sigma[subtask_id]
 
 
-def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=2e6, param_dict=dict(), verbose=1, provided_envs=None):
+def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=4e6, param_dict=dict(), verbose=1, provided_envs=None):
     if provided_envs is None:
         envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
     else:
@@ -634,7 +638,7 @@ def test_agent(env_id, hand_type, task_type, n_eval_episodes=500, n_displayed_ep
 
     # Render the environment
     gym.logger.min_level = logging.ERROR
-    env = _make_env(env_id, hand_type, task_type, record=True)
+    env = _make_env(env_id, hand_type, task_type, render=True, record=True)
     episodes = 1
     obj_type = 0 if task_type is None else task_type
     obs, info = env.reset(options={"object_type": obj_type})
@@ -755,7 +759,7 @@ def get_video(env_id, hand_type, task_type, ga_index, pt_index):
 
     # Render the environment
     gym.logger.min_level = logging.ERROR
-    env = _make_env(env_id, hand_type, task_type, ga_index=ga_index, pt_index=pt_index, record=True)
+    env = _make_env(env_id, hand_type, task_type, ga_index=ga_index, pt_index=pt_index, render=True, record=True)
     obj_type = 0 if task_type is None else task_type
     options = {"object_type": obj_type}
     if iteration_path is not None:
@@ -785,3 +789,49 @@ def get_video(env_id, hand_type, task_type, ga_index, pt_index):
                 break
             else:
                 return
+
+
+def get_photo(env_id, hand_type, task_type, ga_index, pt_index):
+
+    iteration_path = None
+    if ga_index is not None:
+        iteration_path = f"genetic_algorithm/{ga_index}"
+    elif pt_index is not None:
+        iteration_path = f"permutation_testing/hand_type_{hand_type}_task_{task_type}/{pt_index}"
+    elif ga_index is not None and pt_index is not None:
+        raise ValueError("Cannot specify both ga_index and pt_index.")
+
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, -1, ga_index=ga_index, pt_index=pt_index), n_envs=1, vec_env_cls=DummyVecEnv)
+
+    # If using a genetic algorithm or permutation testing, load the specified hand params
+    if iteration_path is not None:
+        raw_params = np.load(f"{MODEL_FOLDER}/{iteration_path}/hand_params.npy")
+        hand_params = unnorm_hand_params(raw_params.copy())
+        print(f"Norm. Params: {raw_params}")
+        print("Hand Params: ", hand_params.segment_lengths, hand_params.joint_angle, hand_params.rotation_max)
+
+    # Render the environment
+    gym.logger.min_level = logging.ERROR
+    env = _make_env(env_id, hand_type, None, ga_index=ga_index, pt_index=pt_index, render=True, better_exploration=False)
+    obj_type = 0
+    options = {"object_type": -1, "photo_mode": True}
+    if iteration_path is not None:
+        options["hand_parameters"] = hand_params
+
+    obs, info = env.reset(options=options)
+    action = np.zeros(env.action_space.shape, dtype=np.float32)  # No action needed for photo
+    action[-1] = 1.0
+    frame = 0
+    while True:
+        obs, reward, done, terminated, info = env.step(action)
+        frame_img = env.render()
+        frame += 1
+        if done or terminated or frame >= PHOTO_FRAME:
+            photo_folder = f"{PHOTOS_FOLDER}/{iteration_path}" if iteration_path is not None else f"{PHOTOS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
+            os.makedirs(photo_folder, exist_ok=True)
+            photo_path = os.path.join(photo_folder, f"photo.png")
+            Image.fromarray(frame_img).save(photo_path)
+            print(f"Photo saved to {photo_path}")
+            obj_type += 1
+            obs, info = env.reset(options={"object_type": obj_type})
+            break
