@@ -13,6 +13,7 @@ FLOOR_COLOR = (64, 64, 64)
 PI2 = 2*np.pi
 HPI = np.pi/2
 DOME_PRECISION = 12
+RANDOM_PRECISION = 12
 
 
 def get_rect_vertices(size, offset=(0, 0)):
@@ -87,8 +88,8 @@ class Hand():
     FORCE = 20000
 
 
-    def __init__(self, space, rng, parameters=None):
-        position = (rng.random()*WINDOW_SIZE[0], self.MIN_Y_SPAWN)#((np.array([WINDOW_SIZE[0], WINDOW_SIZE[1]-self.MIN_Y_SPAWN]) * rng.random(2, dtype=float)) \
+    def __init__(self, space, rng, parameters=None, centered=False):
+        position = (WINDOW_SIZE[0]/2, self.MIN_Y_SPAWN) if centered else (rng.random()*WINDOW_SIZE[0], self.MIN_Y_SPAWN)#((np.array([WINDOW_SIZE[0], WINDOW_SIZE[1]-self.MIN_Y_SPAWN]) * rng.random(2, dtype=float)) \
                    #+ np.array([0, self.MIN_Y_SPAWN])).tolist()
         
         if parameters is None:
@@ -223,6 +224,7 @@ class Object():
         cross  = 4
         elbow  = 5
         pivot  = 6
+        random = 7
 
     COLOR = (255, 0, 0)
     SIZE = 48
@@ -238,6 +240,7 @@ class Object():
     DOME_MOI = pymunk.moment_for_poly(MASS, DOME_VERTICES)
     CROSS_WIDTH = SIZE/6
     CROSS_MOI = 2*pymunk.moment_for_box(MASS/2, (SIZE, CROSS_WIDTH))
+    RANDOM_ANGLE = PI2 / RANDOM_PRECISION
 
 
     def __init__(self, space, rng, obj_type):
@@ -269,22 +272,49 @@ class Object():
             _offset = -(self.CROSS_WIDTH+self.SIZE)/2
             self._shape = pymunk.Poly(self._body, get_rect_vertices((self.CROSS_WIDTH, self.SIZE), offset=(_offset, _offset)))
             self._shape2 = pymunk.Poly(self._body, get_rect_vertices((self.SIZE, self.CROSS_WIDTH), offset=(_offset, _offset)))
-        else: # pivot
+        elif self._type == self.ObjectTypes.pivot.value: # pivot
             self._body = pymunk.Body(1, self.CROSS_MOI, body_type=pymunk.Body.DYNAMIC)
             self._shape = pymunk.Poly(self._body, get_rect_vertices((self.CROSS_WIDTH, self.SIZE), offset=(-self.CROSS_WIDTH/2, -self.SIZE/4)))
             self._shape2 = pymunk.Poly(self._body, get_rect_vertices((self.SIZE, self.CROSS_WIDTH), offset=(-self.SIZE/2, -self.CROSS_WIDTH/2-self.SIZE/4)))
+        elif self._type == self.ObjectTypes.random.value: # random
+            self._body = pymunk.Body(1, self.CIRCLE_MOI, body_type=pymunk.Body.DYNAMIC)
+            self._shapes = []
+            first_rad = rng.uniform(self.SIZE/8, self.SIZE)
+            prev_rad = first_rad
+            prev_x = prev_rad
+            prev_y = 0
+            for i in range(1, RANDOM_PRECISION):
+                angle = i * self.RANDOM_ANGLE
+                radius = rng.uniform(self.SIZE/4, self.SIZE)
+                x = radius * np.cos(angle)
+                y = radius * np.sin(angle)
+                self._shapes.append(pymunk.Poly(self._body, [(prev_x, prev_y), (x,y), (0, 0)]))
+                prev_rad = radius
+                prev_x = x
+                prev_y = y
+            self._shapes.append(pymunk.Poly(self._body, [(prev_x, prev_y), (first_rad,0), (0, 0)]))
+        else:
+            self._body = pymunk.Body(1, self.CIRCLE_MOI, body_type=pymunk.Body.DYNAMIC)
+            self._shape = pymunk.Circle(self._body, 1)
 
         # Set the object's properties
-        self._body.position = (WINDOW_SIZE[0]/2, FLOOR_Y+self.SIZE/2) #((WINDOW_SIZE[0]-2*self.SPAWN_X_BUFFER)*rng.random(dtype=float) + self.SPAWN_X_BUFFER, FLOOR_Y+self.SIZE/2)
-        self._shape.friction = self.FRICTION
-        self._shape.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
+        self._body.position = (WINDOW_SIZE[0]/2, FLOOR_Y+self.SIZE) #((WINDOW_SIZE[0]-2*self.SPAWN_X_BUFFER)*rng.random(dtype=float) + self.SPAWN_X_BUFFER, FLOOR_Y+self.SIZE/2)
+        if self._type != self.ObjectTypes.random.value:
+            self._shape.friction = self.FRICTION
+            self._shape.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
 
-        if self._type in [self.ObjectTypes.cross.value, self.ObjectTypes.elbow.value, self.ObjectTypes.pivot.value]:
-            self._shape2.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
-            self._shape2.friction = self.FRICTION
-            space.add(self._body, self._shape, self._shape2)
+            if self._type in [self.ObjectTypes.cross.value, self.ObjectTypes.elbow.value, self.ObjectTypes.pivot.value]:
+                self._shape2.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
+                self._shape2.friction = self.FRICTION
+                space.add(self._body, self._shape, self._shape2)
+            else:
+                space.add(self._body, self._shape)
+
         else:
-            space.add(self._body, self._shape)
+            for shape in self._shapes:
+                shape.friction = self.FRICTION
+                shape.filter = pymunk.ShapeFilter(categories=0b10, mask=pymunk.ShapeFilter.ALL_MASKS())
+            space.add(self._body, *self._shapes)
 
     def get_state(self):
         return np.array([self._body.position[0]/WINDOW_SIZE[0], 
@@ -304,7 +334,12 @@ class Object():
             pygame.draw.polygon(canvas,
                                 self.COLOR,
                                 np.array([self._body.position]) + rotate_vertices(self._shape.get_vertices(), self._body.angle))
-        else: # cross, elbow, pivot
+        elif self._type == self.ObjectTypes.random.value:
+            for shape in self._shapes:
+                pygame.draw.polygon(canvas,
+                                    self.COLOR,
+                                    np.array([self._body.position]) + rotate_vertices(shape.get_vertices(), self._body.angle))
+        elif self._type != -1: # Don't draw the -1 type
             pygame.draw.polygon(canvas,
                                 self.COLOR,
                                 np.array([self._body.position]) + rotate_vertices(self._shape.get_vertices(), self._body.angle))
@@ -319,7 +354,7 @@ class ManipulationEnv(gym.Env):
     GOAL_RADIUS = 32
     GOAL_ROTATION = 0.1
     GRAVITY = -256
-    PHYSICS_TIMESTEP = 1/50
+    PHYSICS_TIMESTEP = 1/60
     TARGET_Y_MAX_BUFFER = 96
     TARGET_Y_MIN_BUFFER = 48
     MAX_TIME = 150
@@ -404,7 +439,9 @@ class ManipulationEnv(gym.Env):
         self.subtask_distribution = options.get("subtask_distribution", self.subtask_distribution)
         if object_type is None: # Use the distribution when object type is not provided.
             object_type = np.random.choice(len(self.subtask_distribution), p=self.subtask_distribution)
-
+        
+        self._photo_mode = options.get("photo_mode", False)
+            
         self._elapsed_steps = 0
 
         self._space = pymunk.Space()
@@ -413,7 +450,7 @@ class ManipulationEnv(gym.Env):
 
         # Add the objects to the physical space
         self._floor = Floor(self._space)
-        self._hand = Hand(self._space, self.np_random, parameters=self.hand_parameters)
+        self._hand = Hand(self._space, self.np_random, parameters=self.hand_parameters, centered=self._photo_mode)
         self._object = Object(self._space, self.np_random, obj_type=object_type)
 
         self._target_position = np.array([((WINDOW_SIZE[0] - 2*self._object.SIZE)*self.np_random.random(dtype=float)) + self._object.SIZE, 
