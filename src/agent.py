@@ -29,9 +29,10 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.distributions import Distribution
 from stable_baselines3.common.buffers import RolloutBuffer
 
-from Grasper.wrappers import BetterExploration, HandParams, TaskType
-from baseline import BASELINE_PATH, load_baseline
-from hand_morphologies import unnorm_hand_params
+from src.Grasper.wrappers import BetterExploration, HandParams, TaskType
+from src.baseline import BASELINE_PATH, load_baseline
+from src.hand_morphologies import unnorm_hand_params
+from src import *
 
 
 CPU_COUNT = os.cpu_count()-4
@@ -246,7 +247,7 @@ class DAPG(PPO):
 
         self.lambda_bc_init = 0.1
         self.lambda_bc_decay = 0.98
-        self.task_count = self.env.get_attr("OBJECT_TYPES")[0]
+        self.task_count = 2
         self.subtask_distribution = None
 
         # Normalize value for each reward
@@ -256,7 +257,7 @@ class DAPG(PPO):
         self.subtask_value_sigma = [torch.tensor(1.0) for _ in range(self.task_count)]
         self.subtask_value_mean_square = [torch.tensor(1.0) for _ in range(self.task_count)]
 
-        self.use_baseline = True
+        self.use_baseline = False
 
     def _get_task_id(self, obs: PyTorchObs) -> int:
         return obs[:, 0:self.task_count].argmax(dim=1)
@@ -552,7 +553,8 @@ class DAPG(PPO):
 
 def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=4e6, param_dict=dict(), verbose=1, provided_envs=None):
     if provided_envs is None:
-        envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
+        better_exploration = env_id == TASK_2D
+        envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type, better_exploration=better_exploration), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
     else:
         envs = provided_envs
 
@@ -580,7 +582,7 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
         tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
     
     # Load or create model
-    task_count = envs.get_attr("OBJECT_TYPES")[0]
+    task_count = 2
     if continue_training:
         checkpoint_files = glob.glob(f"{checkpoint_folder}/{CHECKPOINT_NAME}_*.zip")
         if not checkpoint_files:
@@ -597,10 +599,11 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
         ppo_args["verbose"] = verbose
         ppo_args["tensorboard_log"] = tensorboard_log
         ppo_args["policy_kwargs"]["task_count"] = task_count
-        model = DAPG(env=envs, **param_dict, **ppo_args)
+        #model = DAPG(env=envs, **param_dict, **ppo_args)
+        model = PPO(policy="MlpPolicy", env=envs, device="cpu", tensorboard_log=tensorboard_log)
 
     # Train model
-    model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, eval_callback, subtask_reward_callback])
+    model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, eval_callback])
     model.save(f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}")
     return model
 
@@ -737,16 +740,17 @@ def get_video(env_id, hand_type, task_type, ga_index, pt_index):
         model_path = f"{MODEL_FOLDER}/{iteration_path}/policy"
     else:
         if task_type is None:
-            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
+            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_None/{CHECKPOINT_NAME}"
         else:
             model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
 
-    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type, ga_index=ga_index, pt_index=pt_index), n_envs=1, vec_env_cls=DummyVecEnv)
+    better_exploration = env_id == TASK_2D
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type, ga_index=ga_index, pt_index=pt_index, better_exploration=better_exploration), n_envs=1, vec_env_cls=DummyVecEnv)
 
     # Load model
     print(f"Loading model from {model_path}")
     ppo_args = PPO_ARGS.copy()
-    task_count = env.get_attr("OBJECT_TYPES")[0]
+    task_count = env.get_attr("OBJECT_TYPES")[0] if env == TASK_2D else 1
     ppo_args["policy_kwargs"]["task_count"] = task_count
     model = DAPG.load(env=env, path=model_path, **ppo_args)
 
@@ -805,7 +809,10 @@ def get_photo(env_id, hand_type, task_type, ga_index, pt_index):
 
     # If using a genetic algorithm or permutation testing, load the specified hand params
     if iteration_path is not None:
-        raw_params = np.load(f"{MODEL_FOLDER}/{iteration_path}/hand_params.npy")
+        if pt_index is not None:
+            raw_params = np.load(f"{MODEL_FOLDER}/{iteration_path}/hand_params.npy")
+        else:
+            raw_params = np.load("morphologies/morphologies.npy")[0]
         hand_params = unnorm_hand_params(raw_params.copy())
         print(f"Norm. Params: {raw_params}")
         print("Hand Params: ", hand_params.segment_lengths, hand_params.joint_angle, hand_params.rotation_max)

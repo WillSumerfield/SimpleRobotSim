@@ -9,8 +9,8 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 
-from demo import load_demos
-from Grasper.wrappers import BetterExploration, HandParams, TaskType
+from src.demo import load_demos
+from src.Grasper.wrappers import BetterExploration, HandParams, TaskType
 
 
 BASELINE_PATH = "models/baseline/baseline_model.pth"

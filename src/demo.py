@@ -9,9 +9,9 @@ import time
 import os
 import glob
 
-import Grasper
-from Grasper.wrappers import BetterExploration, HandParams, TaskType
-from key_checks import key_presses, get_actions, on_press, on_release
+import src.Grasper
+from src.Grasper.wrappers import BetterExploration, HandParams, TaskType
+from src.key_checks import key_presses, get_actions, on_press, on_release
 
 
 DEMO_FOLDER = "./demos"

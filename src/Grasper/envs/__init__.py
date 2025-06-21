@@ -1,2 +1,2 @@
-from Grasper.envs.manipulation import ManipulationEnv
-from Grasper.envs.claw_game import ClawGameEnv
+from src.Grasper.envs.grasp2D import Grasp2DEnv
+from src.Grasper.envs.grasp2_5D import Grasp2_5DEnv

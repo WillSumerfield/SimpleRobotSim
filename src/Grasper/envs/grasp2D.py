@@ -348,7 +348,7 @@ class Object():
                                 np.array([self._body.position]) + rotate_vertices(self._shape2.get_vertices(), self._body.angle))
 
 
-class ManipulationEnv(gym.Env):
+class Grasp2DEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
     GOAL_RADIUS = 32

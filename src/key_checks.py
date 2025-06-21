@@ -19,15 +19,7 @@ def get_actions():
     global key_presses
 
     # Movement
-    movement = 0 # Default to 'up'
-    if key_presses["w"]:
-        movement = 1
-    if key_presses["s"]:
-        movement = 2
-    if key_presses["a"]:
-        movement = 3
-    if key_presses["d"]:
-        movement = 4
+    movement = [key_presses["w"], key_presses["a"], key_presses["s"], key_presses["d"]]
 
     # Rotation
     rotation = 0

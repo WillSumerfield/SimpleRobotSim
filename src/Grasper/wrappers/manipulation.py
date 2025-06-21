@@ -2,8 +2,8 @@ import gymnasium as gym
 import numpy as np
 import pygame
 
-from Grasper.envs.manipulation import WINDOW_SIZE, FLOOR_Y, Object
-from hand_morphologies import HAND_TYPES
+from src.Grasper.envs.grasp2D import WINDOW_SIZE, FLOOR_Y, Object
+from src.hand_morphologies import HAND_TYPES
 
 
 SQ2 = np.sqrt(2)

@@ -1,6 +1,6 @@
 import numpy as np
 
-from Grasper.envs.manipulation import Hand
+from src.Grasper.envs.grasp2D import Hand
 
 
 HAND_TYPES = [
