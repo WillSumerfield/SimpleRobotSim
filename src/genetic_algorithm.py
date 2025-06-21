@@ -1,6 +1,7 @@
 import os
 import random
 import copy
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -15,15 +16,16 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 
-from hand_morphologies import unnorm_hand_params
-from agent import CPU_COUNT, PPO_ARGS, DAPG
-import Grasper
-from Grasper.wrappers import BetterExploration, TaskType
+from src.hand_morphologies import unnorm_hand_params
+from src.agent import CPU_COUNT, PPO_ARGS, DAPG
+import src.Grasper
+from src.Grasper.wrappers import BetterExploration, TaskType
 
 
 NUM_GENERATIONS = 20
 MORPHOLOGY_SAVE_PATH = "morphologies/"
 CHECKPOINTS_FOLDER = "checkpoints/genetic_algorithm"
+MODEL_FOLDER = f"models/genetic_algorithm"
 LOGS_FOLDER = "training_logs/genetic_algorithm"
 DIAGRAMS_FOLDER = "diagrams/genetic_algorithm"
 MODEL_NAME = "policy.zip"
@@ -121,7 +123,7 @@ class GeneticAlgorithm():
 
         self.individual_index = 0
         def init_individual():
-            return creator.Individual(self.get_new_index(), np.random.normal(0, 1, size=self.task_count).astype(np.float32))
+            return creator.Individual(self.get_new_index(), np.random.normal(0, 1, 7).astype(np.float32))
 
         # Define the population
         self.toolbox = base.Toolbox()
@@ -200,11 +202,11 @@ class GeneticAlgorithm():
         for species in species_counts:
             if species not in self.species_data:
                 self.species_data[species] = copy.deepcopy(self.data_dict)
-            self.species_data[individual.index]["generation"] += [self.generation]
-            self.species_data[individual.index]["proportion"] += [species_counts[species]/self.POP_SIZE]
-            self.species_data[individual.index]["fitness"] += [individual.fitness.values[0]]
-            self.species_data[individual.index]["parent"] = individual.parent_index
-            self.species_data[individual.index]["max fitness"] = max(self.species_data[individual.index]["fitness"])
+            self.species_data[species]["generation"] += [self.generation]
+            self.species_data[species]["proportion"] += [species_counts[species]/self.POP_SIZE]
+            self.species_data[species]["fitness"] += [individual.fitness.values[0]]
+            self.species_data[species]["parent"] = individual.parent_index
+            self.species_data[species]["max fitness"] = max(self.species_data[individual.index]["fitness"])
 
         self._update_graphs()
 
@@ -277,6 +279,7 @@ class GeneticAlgorithm():
         plt.ylabel("Proportion")
         plt.savefig(f"{DIAGRAMS_FOLDER}/species_proportions.png")
         plt.clf()
+        plt.close()
 
         # Heritage Graph
         G = nx.DiGraph()
@@ -288,6 +291,7 @@ class GeneticAlgorithm():
         plt.axis('off')
         plt.savefig(f"{DIAGRAMS_FOLDER}/heritage_graph.png")
         plt.clf()
+        plt.close()
 
         # Fitness per species
         generations = []
@@ -304,10 +308,12 @@ class GeneticAlgorithm():
         })
         sns.lineplot(data=data, x="Generation", y="Fitness", hue="Species Index")
         plt.title("Fitness per Species")
+        plt.xticks(range(int(data["Generation"].min()), int(data["Generation"].max()) + 1))
         plt.xlabel("Generation")
         plt.ylabel("Fitness")
         plt.savefig(f"{DIAGRAMS_FOLDER}/fitness_per_species.png")
         plt.clf()
+        plt.close()
 
 
 def evolve_hands(env_id: str, task_type):
@@ -327,8 +333,14 @@ def evolve_hands(env_id: str, task_type):
     print(f"Avg. Fitness: {avg:.2f}, Max: {mx:.2f}, Min: {mn:.2f}                                          ")
 
     # Save the top hands
-    save_path = MORPHOLOGY_SAVE_PATH + f"_task_{task_type}.npy"
+    save_path = MORPHOLOGY_SAVE_PATH + "morphologies.npy"
+    indices = [individual.index for individual in genetic_algorithm._pop]
     final_morphologies = np.array([individual.hand_morphology for individual in genetic_algorithm._pop])
     os.makedirs(MORPHOLOGY_SAVE_PATH, exist_ok=True)
     np.save(save_path, final_morphologies)
-    print(f"Saving top hands to {save_path}")
+    os.makedirs(MODEL_FOLDER, exist_ok=True)
+    for idx in indices:
+        os.makedirs(f"{MODEL_FOLDER}/{idx}", exist_ok=True)
+        shutil.copy(f"{CHECKPOINTS_FOLDER}/{idx}/{MODEL_NAME}", f"{MODEL_FOLDER}/{idx}/{idx}.zip")
+    print(f"Saving top morphologies to {save_path}")
+    print(f"Saved top policies to {MODEL_FOLDER}")

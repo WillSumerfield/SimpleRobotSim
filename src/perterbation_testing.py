@@ -9,9 +9,9 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 
-from Grasper.wrappers import BetterExploration, TaskType
-from hand_morphologies import HAND_TYPES, norm_hand_params, unnorm_hand_params
-from agent import MODEL_FOLDER, CHECKPOINT_NAME, CPU_COUNT, PPO_ARGS, DAPG
+from src.Grasper.wrappers import BetterExploration, TaskType
+from src.hand_morphologies import HAND_TYPES, norm_hand_params, unnorm_hand_params
+from src.agent import MODEL_FOLDER, CHECKPOINT_NAME, CPU_COUNT, PPO_ARGS, DAPG
 np.set_printoptions(precision=2, suppress=True)
 
 
@@ -19,7 +19,7 @@ EVAL_EPISODES = 1000
 TRAIN_TIMESTEPS = 4e6
 FINE_TUNE_TIMESTEPS = 1e6
 
-PARAM_INDEX = [4, 5]
+PARAM_INDEX = [0, 1]
 PARAM_OFFSET = 0
 PARAM_SPAN = 0.5
 PERMUATION_COUNT = 4
