@@ -4,6 +4,7 @@ videos
 training_logs
 models
 photos
+test.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
