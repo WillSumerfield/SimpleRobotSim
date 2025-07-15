@@ -5,15 +5,12 @@ My implementation of a PPO agent trained on the Grasper environment.
 import os
 import glob
 import logging
-from typing import Optional, Callable, Any
 from itertools import product
-from functools import partial
 from PIL import Image
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.nn as nn
 import gymnasium as gym
 from gymnasium import spaces
 from stable_baselines3 import PPO
@@ -24,243 +21,74 @@ from stable_baselines3.common.vec_env import VecEnv, SubprocVecEnv, DummyVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback, StopTrainingOnRewardThreshold, EvalCallback, CheckpointCallback
 from stable_baselines3.common.utils import explained_variance, obs_as_tensor
-from stable_baselines3.common.type_aliases import PyTorchObs
-from stable_baselines3.common.policies import ActorCriticPolicy
-from stable_baselines3.common.distributions import Distribution
 from stable_baselines3.common.buffers import RolloutBuffer
 
-from src.Grasper.wrappers import BetterExploration, HandParams, TaskType
-from src.baseline import BASELINE_PATH, load_baseline
-from src.hand_morphologies import unnorm_hand_params
 from src import *
+from src.Grasper.wrappers import HandParams, TaskType
+from src.hand_morphologies import unnorm_hand_params
 
 
-CPU_COUNT = os.cpu_count()-4
-REWARD_THRESHOLD = 1000
-CHECKPOINTS_FOLDER = "./checkpoints"
-CHECKPOINT_NAME = "ppo_grasper"
-VIDEOS_FOLDER = "./videos"
-PHOTOS_FOLDER = "./photos"
-LOGS_FOLDER = "./training_logs"
-MODEL_FOLDER = "./models"
+CPU_COUNT = int(os.cpu_count()/2)
+REWARD_THRESHOLD = 130
+PHOTO_FRAME = 15
+TRAIN_EPSISODES = 1e6
+EVAL_EPISODES = 500
+
 POLICY_ARGS = {"net_arch": [64, 64], "activation_fn": torch.nn.ReLU, "optimizer_class": torch.optim.Adam}
-PPO_ARGS = {"learning_rate": 1e-4, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
+PPO_ARGS = {"learning_rate": 3e-4, "policy_kwargs": POLICY_ARGS, "verbose": 1, "device": "cpu", "batch_size": 256, 
             "ent_coef": 0.01, "gamma": 0.98, "n_epochs": 10}
 PARAM_DICT = {"gamma": [0.98], "ent_coef": [0.01, 0.1]}
-PHOTO_FRAME = 15
 
 
-def _make_env(env_id, hand_type, task_type, ga_index=None, pt_index=None, render=False, record=False, better_exploration=True):
+def _make_env(env_id, hand_type, task_type, ga_index=None, pt_index=None, render=False, record=False):
+
+    env_folder = ENV_FOLDER_2D if env_id == ENV_2D else ENV_FOLDER_2_5D
+
     if not render:
         env = gym.make(env_id)
     else:
         env = gym.make(env_id, render_mode="rgb_array")
-    if better_exploration:
-        env = BetterExploration(env)
     if ga_index is None and pt_index is None:
         env = HandParams(env, hand_type)
-    if task_type is not None:
-        env = TaskType(env, task_type)
+    env = TaskType(env, task_type)
     env = gym.wrappers.FlattenObservation(env)
     env = Monitor(env)
     if not render:
         check_env(env)
     elif record:
         if ga_index is not None:
-            video_folder = f"{VIDEOS_FOLDER}/genetic_algorithm/{ga_index}"
+            video_folder = f"{VIDEOS_FOLDER}/{env_folder}/{GA_FOLDER}/"
         elif pt_index is not None:
-            video_folder = f"{VIDEOS_FOLDER}/permutation_testing/hand_type_{hand_type}_task_{task_type}/{pt_index}"
+            video_folder = f"{VIDEOS_FOLDER}/{env_folder}/{PT_FOLDER}/task{task_type}/hand{hand_type}"
         else:
             if task_type is None:
-                video_folder = f"{VIDEOS_FOLDER}/hand_type_{hand_type}"
+                video_folder = f"{VIDEOS_FOLDER}/{env_folder}/hand{hand_type}"
             else:
-                video_folder = f"{VIDEOS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
+                video_folder = f"{VIDEOS_FOLDER}/{env_folder}/hand{hand_type}/task{task_type}"
         env = gym.wrappers.RecordVideo(env, video_folder=video_folder, episode_trigger=lambda x: True, disable_logger=True)
     return env
-
-
-class SubtaskRewardLogger(BaseCallback):
-    def __init__(self, env, verbose=1):
-        super().__init__(verbose)
-        self.env = env
-
-    def _on_rollout_end(self):
-        subtask_rewards_all = [func() for func in self.env.get_attr("get_subtask_performance")]
-        # Sum the rewards across all cores
-        subtask_rewards = dict()
-        subtask_count = dict()
-        for core in subtask_rewards_all:
-            for subtask, reward in core.items():
-                if subtask not in subtask_rewards:
-                    subtask_rewards[subtask] = 0
-                    subtask_count[subtask] = 0
-                subtask_rewards[subtask] += reward
-                subtask_count[subtask] += 1
-        # Average the rewards
-        for subtask in subtask_rewards:
-            subtask_rewards[subtask] /= subtask_count[subtask]
-        # Log the average reward for each subtask
-        for subtask, reward in subtask_rewards.items():
-            self.logger.record(f"subtasks/{subtask}_ep_rew_mean", reward)
-        return True
-    
-    def _on_training_start(self) -> None:
-        pass
-
-    def _on_rollout_start(self) -> None:
-        pass
-
-    def _on_step(self) -> bool:
-        return True
-
-    def _on_training_end(self) -> None:
-        pass
-
-
-class MultiTaskMlpPolicy(ActorCriticPolicy):
-
-    def __init__(self, *args, **kwargs):
-        self.task_count = kwargs.pop("task_count", 1)
-        super().__init__(*args, **kwargs)
-
-    def _build(self, lr_schedule: Callable[[float], float]) -> None:
-        self._build_mlp_extractor()
-
-        latent_dim_pi = self.mlp_extractor.latent_dim_pi
-        self.action_nets = nn.ModuleList([self.action_dist.proba_distribution_net(latent_dim=latent_dim_pi) for _ in range(self.task_count)])
-        self.value_nets = nn.ModuleList([nn.Linear(self.mlp_extractor.latent_dim_vf, 1) for _ in range(self.task_count)])
-
-        # Init weights: use orthogonal initialization with small initial weight for the output
-        if self.ortho_init:
-            module_gains = {
-                self.features_extractor: np.sqrt(2),
-                self.mlp_extractor: np.sqrt(2),
-                "action_nets": (self.action_nets, 0.01),
-                "value_nets": (self.value_nets, 1),
-            }
-            if not self.share_features_extractor:
-                del module_gains[self.features_extractor]
-                module_gains[self.pi_features_extractor] = np.sqrt(2)
-                module_gains[self.vf_features_extractor] = np.sqrt(2)
-
-            for module, gain in module_gains.items():
-                if isinstance(module, str):
-                    for sub_module in gain[0]:
-                        sub_module.apply(partial(self.init_weights, gain=gain[1]))
-                else:
-                    module.apply(partial(self.init_weights, gain=gain))
-
-        # Setup optimizer with initial learning rate
-        self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
-
-    def _get_task_id(self, obs: PyTorchObs) -> int:
-        return obs[:, 0:self.task_count].argmax(dim=1)
-
-    def _get_action_dist_from_latent(self, task_id: int, latent_pi: torch.Tensor) -> Distribution:
-        mean_actions = self.action_nets[task_id](latent_pi)
-        return self.action_dist.proba_distribution(action_logits=mean_actions)
-
-    def forward(self, obs: torch.Tensor, deterministic: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Preprocess the observation if needed
-        features = self.extract_features(obs)
-        if self.share_features_extractor:
-            latent_pi, latent_vf = self.mlp_extractor(features)
-        else:
-            pi_features, vf_features = features
-            latent_pi = self.mlp_extractor.forward_actor(pi_features)
-            latent_vf = self.mlp_extractor.forward_critic(vf_features)
-
-        # Evaluate the values for the given observations
-        task_ids = self._get_task_id(obs)
-        actions = torch.empty((obs.shape[0], self.action_space.nvec.shape[0]), dtype=torch.int64, device=obs.device)
-        values = torch.empty(obs.shape[0], dtype=torch.float32, device=obs.device)
-        log_prob = torch.empty(obs.shape[0], dtype=torch.float32, device=obs.device)
-        for task_id in range(self.task_count):
-            task_indices = (task_ids == task_id).nonzero(as_tuple=True)[0]
-            if len(task_indices) == 0:
-                continue
-            distribution = self._get_action_dist_from_latent(task_id, latent_pi[task_indices])
-            actions[task_indices] = distribution.get_actions(deterministic=deterministic)
-            values[task_indices] = self.value_nets[task_id](latent_vf[task_indices]).flatten()
-            log_prob[task_indices] = distribution.log_prob(actions[task_indices])
-        
-        actions = actions.reshape((-1, *self.action_space.shape))  # type: ignore[misc]
-        return actions, values, log_prob
-
-    def evaluate_actions(self, task_id: int, obs: PyTorchObs, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        # Preprocess the observation if needed
-        features = self.extract_features(obs)
-        if self.share_features_extractor:
-            latent_pi, latent_vf = self.mlp_extractor(features)
-        else:
-            pi_features, vf_features = features
-            latent_pi = self.mlp_extractor.forward_actor(pi_features)
-            latent_vf = self.mlp_extractor.forward_critic(vf_features)
-        distribution = self._get_action_dist_from_latent(task_id, latent_pi)
-        log_prob = distribution.log_prob(actions)
-        values = self.value_nets[task_id](latent_vf)
-        entropy = distribution.entropy()
-        logits = torch.cat([dist.probs for dist in distribution.distribution], dim=1)
-        return values, log_prob, entropy, logits
-    
-    def get_distribution(self, obs: PyTorchObs) -> Distribution:
-        features = super().extract_features(obs, self.pi_features_extractor)
-        latent_pi = self.mlp_extractor.forward_actor(features)
-        task_ids = self._get_task_id(obs)
-        logits = [torch.empty((obs.shape[0], space), dtype=torch.float32, device=obs.device) for space in self.action_space.nvec]
-        for task_id in range(self.task_count):
-            task_indices = (task_ids == task_id).nonzero(as_tuple=True)[0]
-            if len(task_indices) == 0:
-                continue
-            dist = self._get_action_dist_from_latent(task_id, latent_pi[task_indices])
-            for i in range(self.action_space.nvec.shape[0]):
-                logits[i][task_indices] = dist.distribution[i].logits
-        # Combine the distributions for all tasks
-        dists = self.action_dist.proba_distribution(action_logits=torch.cat(logits, dim=1))
-        return dists
-
-    def predict_values(self, obs: PyTorchObs) -> torch.Tensor:
-        features = super().extract_features(obs, self.vf_features_extractor)
-        latent_vf = self.mlp_extractor.forward_critic(features)
-        task_ids = self._get_task_id(obs)
-        values = torch.empty(obs.shape[0], dtype=torch.float32, device=obs.device)
-        for task_id in range(self.task_count):
-            task_indices = (task_ids == task_id).nonzero(as_tuple=True)[0]
-            if len(task_indices) == 0:
-                continue
-            values[task_indices] = self.value_nets[task_id](latent_vf[task_indices]).flatten()
-        return values
-
 
 class DAPG(PPO):
     def __init__(self, **kwargs):
         args = {key: value for key, value in PPO_ARGS.items() if key not in kwargs}
         if "policy" not in kwargs:
-            args["policy"] = MultiTaskMlpPolicy
+            args["policy"] = "MlpPolicy"
         if "verbose" not in kwargs:
             args["verbose"] = 0 # Stupid fix to bug in stable_baselines3
         super().__init__(**{**args, **kwargs})
-        self.baseline_policy = load_baseline(device=self.device, verbose=self.verbose)
+        self.baseline_policy = None#torch.load(None, weights_only=False)
+        self.baseline_policy.to(self.device)
         self.baseline_policy.eval()
         for param in self.baseline_policy.parameters():
             param.requires_grad = False
 
         self.lambda_bc_init = 0.1
         self.lambda_bc_decay = 0.98
-        self.task_count = 2
-        self.subtask_distribution = None
 
         # Normalize value for each reward
         self.beta = 0.999
         self.epsilon = 1e-5
-        self.subtask_value_mu = [torch.tensor(0.0) for _ in range(self.task_count)]
-        self.subtask_value_sigma = [torch.tensor(1.0) for _ in range(self.task_count)]
-        self.subtask_value_mean_square = [torch.tensor(1.0) for _ in range(self.task_count)]
-
         self.use_baseline = False
-
-    def _get_task_id(self, obs: PyTorchObs) -> int:
-        return obs[:, 0:self.task_count].argmax(dim=1)
 
     # Modified PPO class to include Behavior Cloning
     def train(self) -> None:
@@ -503,65 +331,23 @@ class DAPG(PPO):
 
         callback.on_rollout_end()
 
-        # Update the ratio of subtasks based on the most recent rewards
-        # subtask_rewards = [0]*self.task_count
-        # self.subtask_counts = [0]*self.task_count
-        # for ep in self.ep_info_buffer:
-        #     task = ep["subtask_type"]
-        #     subtask_rewards[task] += ep["r"]
-        #     self.subtask_counts[task] += 1
-        # subtask_sigmoid = [1/(1+np.exp(reward/200)) for reward in subtask_rewards]
-        # subtask_sum = sum(subtask_sigmoid)
-        # self.subtask_distribution = [ss/subtask_sum for ss in subtask_sigmoid]
-        # self.env.set_options({"subtask_distribution": self.subtask_distribution})
-
         return True
 
-    def _update_info_buffer(self, infos: list[dict[str, Any]], dones: Optional[np.ndarray] = None) -> None:
-        assert self.ep_info_buffer is not None
-        assert self.ep_success_buffer is not None
 
-        if dones is None:
-            dones = np.array([False] * len(infos))
-        for idx, info in enumerate(infos):
-            maybe_ep_info = info.get("episode")
-            maybe_is_success = info.get("is_success")
-            if maybe_ep_info is not None:
-                subtask_type = info.get("task_type")
-                ep_info = {"subtask_type": subtask_type, "r": maybe_ep_info["r"], "l": maybe_ep_info["l"]}
-                self.ep_info_buffer.extend([ep_info])
-            if maybe_is_success is not None and dones[idx]:
-                self.ep_success_buffer.append(maybe_is_success)
-
-    def _normalize_subtask_value_loss(self, value_loss: torch.Tensor, subtask_id: int):
-        value_loss_nograd = value_loss.detach().clone()
-        batch_mean = value_loss_nograd.mean()
-        batch_mean_sq = (value_loss_nograd**2).mean()
-        
-        # Update running averages with EMA
-        new_mean = self.beta * self.subtask_value_mu[subtask_id] + (1 - self.beta) * batch_mean
-        new_mean_sq = self.beta * self.subtask_value_mean_square[subtask_id] + (1 - self.beta) * batch_mean_sq
-        new_sigma = torch.sqrt(new_mean_sq - new_mean**2 + self.epsilon)
-        
-        # Update running normalization values
-        self.subtask_value_mu[subtask_id].copy_(new_mean)
-        self.subtask_value_mean_square[subtask_id].copy_(new_mean_sq)
-        self.subtask_value_sigma[subtask_id].copy_(new_sigma)
-
-        return (value_loss - self.subtask_value_mu[subtask_id]) / self.subtask_value_sigma[subtask_id]
-
-
-def train_agent(env_id, hand_type, task_type, continue_training=False, total_timesteps=4e6, param_dict=dict(), verbose=1, provided_envs=None):
+def train_agent(env_id, hand_type, task_type, total_timesteps=TRAIN_EPSISODES, param_dict=dict(), verbose=1, provided_envs=None):
     if provided_envs is None:
-        better_exploration = env_id == TASK_2D
-        envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type, better_exploration=better_exploration), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
+        envs = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
     else:
         envs = provided_envs
 
-    if task_type is None:
-        checkpoint_folder = f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_multitask"
-    else:
-        checkpoint_folder = f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
+    env_folder = ENV_FOLDER_2D if env_id == ENV_2D else ENV_FOLDER_2_5D
+    checkpoint_folder = f"{CHECKPOINTS_FOLDER}/{env_folder}/task{task_type}/hand{hand_type}"
+    tensorboard_log   = f"{LOGS_FOLDER}/{env_folder}/task{task_type}/hand{hand_type}"
+    model_folder = f"{MODEL_FOLDER}/{env_folder}"
+    model_path = f"{model_folder}/task{task_type}_hand{hand_type}.zip"
+    os.makedirs(checkpoint_folder, exist_ok=True)
+    os.makedirs(tensorboard_log, exist_ok=True)
+    os.makedirs(model_folder, exist_ok=True)
 
     # Callback Functions
     rew_callback = StopTrainingOnRewardThreshold(reward_threshold=REWARD_THRESHOLD, verbose=verbose)
@@ -573,67 +359,41 @@ def train_agent(env_id, hand_type, task_type, continue_training=False, total_tim
         deterministic=True,
         verbose=verbose
     )
-    checkpoint_callback = CheckpointCallback(save_freq=1e4, save_path=checkpoint_folder, name_prefix=CHECKPOINT_NAME, verbose=verbose)
-    subtask_reward_callback = SubtaskRewardLogger(envs, verbose=verbose)
-
-    if task_type is None:
-        tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}_multitask"
-    else:
-        tensorboard_log = f"{LOGS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
+    checkpoint_callback = CheckpointCallback(save_freq=1e4, save_path=checkpoint_folder, name_prefix=MODEL_NAME, verbose=verbose)
     
     # Load or create model
-    task_count = 2
-    if continue_training:
-        checkpoint_files = glob.glob(f"{checkpoint_folder}/{CHECKPOINT_NAME}_*.zip")
-        if not checkpoint_files:
-            raise FileNotFoundError("No saved model or checkpoints found.")
-        latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
-        ppo_args = PPO_ARGS.copy()
-        ppo_args["verbose"] = verbose
-        ppo_args["tensorboard_log"] = tensorboard_log
-        ppo_args["policy_kwargs"]["task_count"] = task_count
-        print(f"Loading model from {latest_checkpoint}.")
-        model = DAPG.load(path=latest_checkpoint, env=envs, **ppo_args, kwargs=param_dict)
-    else:
-        ppo_args = PPO_ARGS.copy()
-        ppo_args["verbose"] = verbose
-        ppo_args["tensorboard_log"] = tensorboard_log
-        ppo_args["policy_kwargs"]["task_count"] = task_count
-        #model = DAPG(env=envs, **param_dict, **ppo_args)
-        model = PPO(policy="MlpPolicy", env=envs, device="cpu", tensorboard_log=tensorboard_log)
+    ppo_args = PPO_ARGS.copy()
+    ppo_args["verbose"] = verbose
+    ppo_args["tensorboard_log"] = tensorboard_log
+    
+    model = PPO(policy="MlpPolicy", env=envs, **ppo_args)
 
     # Train model
     model.learn(total_timesteps=total_timesteps, callback=[checkpoint_callback, eval_callback])
-    model.save(f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}")
+    model.save(model_path)
     return model
 
 
-def test_agent(env_id, hand_type, task_type, n_eval_episodes=500, n_displayed_episodes=5, checkpoint=True):
+def test_agent(env_id, hand_type, task_type, n_eval_episodes=EVAL_EPISODES, n_displayed_episodes=5, checkpoint=True):
+
+    env_folder = ENV_FOLDER_2D if env_id == ENV_2D else ENV_FOLDER_2_5D
 
     # Find latest checkpoint
     if checkpoint:
-        if task_type is None:
-            checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}_*.zip")
-        else:
-            checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}_*.zip")
+        checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/{env_folder}/task{task_type}/hand{hand_type}/{MODEL_NAME}_*.zip")
         if not checkpoint_files:
             raise FileNotFoundError("No saved model or checkpoints found.")
         model_path = max(checkpoint_files, key=os.path.getctime)
 
     # Find the specific model
     else:
-        if task_type is None:
-            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
-        else:
-            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
+        model_path = f"{MODEL_FOLDER}/{env_folder}/task{task_type}_hand{hand_type}.zip"
 
     env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
 
     # Load model
     print(f"Loading model from {model_path}")
-    ppo_args = PPO_ARGS.copy()
-    ppo_args["policy_kwargs"]["task_count"] = env.get_attr("OBJECT_TYPES")[0]
-    model = DAPG.load(env=env, path=model_path, **ppo_args, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
+    model = PPO.load(env=env, path=model_path, **PPO_ARGS.copy())
 
     # Evaluate model
     mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=n_eval_episodes, deterministic=True)
@@ -643,8 +403,7 @@ def test_agent(env_id, hand_type, task_type, n_eval_episodes=500, n_displayed_ep
     gym.logger.min_level = logging.ERROR
     env = _make_env(env_id, hand_type, task_type, render=True, record=True)
     episodes = 1
-    obj_type = 0 if task_type is None else task_type
-    obs, info = env.reset(options={"object_type": obj_type})
+    obs, info = env.reset(options={"object_type": task_type})
     while True:
         action, _states = model.predict(obs, deterministic=True)
         obs, reward, done, terminated, info = env.step(action)
@@ -652,13 +411,10 @@ def test_agent(env_id, hand_type, task_type, n_eval_episodes=500, n_displayed_ep
         if done or terminated:
             if episodes >= n_displayed_episodes:
                 break
-            if task_type is not None:
-                break
-            obj_type += 1
-            obs, info = env.reset(options={"object_type": obj_type})
+            obs, info = env.reset(options={"object_type": task_type})
             episodes += 1
     env.close()
-    print(f"Video saved to {VIDEOS_FOLDER} folder.")
+    print(f"Video saved to {VIDEOS_FOLDER}/{env_folder}/task{task_type}/hand{hand_type} folder.")
 
 
 def param_sweep(env_id, hand_type, task_type, param_dict=None, timesteps_per_param=8e6):
@@ -693,70 +449,62 @@ def convert_to_baseline(env_id, hand_type, task_type, checkpoint=True):
 
     # Find latest checkpoint
     if checkpoint:
-        if task_type is None:
-            checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}_*.zip")
-        else:
-            checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}_*.zip")
+        checkpoint_files = glob.glob(f"{CHECKPOINTS_FOLDER}/task{task_type}/hand{hand_type}/{MODEL_NAME}_*.zip")
         if not checkpoint_files:
             raise FileNotFoundError("No saved model or checkpoints found.")
         model_path = max(checkpoint_files, key=os.path.getctime)
 
     # Find the specific model
     else:
-        if task_type is None:
-            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
-        else:
-            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
+        model_path = f"{MODEL_FOLDER}/task{task_type}_hand{hand_type}.zip"
     
     env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type), n_envs=1, vec_env_cls=DummyVecEnv)
+    env_folder = ENV_FOLDER_2D if env_id == ENV_2D else ENV_FOLDER_2_5D
 
     # Load model
     print(f"Loading model from {model_path}")
-    ppo_args = PPO_ARGS.copy()
-    ppo_args["policy_kwargs"]["task_count"] = env.get_attr("OBJECT_TYPES")[0]
-    model = DAPG.load(env=env, path=model_path, **ppo_args, tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
-
-    # Combine the latent compressor and the task head
-    model = nn.Sequential(model.policy.mlp_extractor.policy_net, model.policy.action_nets[task_type])
+    model = DAPG.load(env=env, path=model_path, **PPO_ARGS.copy(), tensorboard_log=f"{LOGS_FOLDER}/hand_type_{hand_type}")
 
     # Save the model
-    torch.save(model, f"{BASELINE_PATH}")
-    print(f"Baseline model saved to {BASELINE_PATH}")
+    baseline_path = f"{MODEL_FOLDER}/{env_folder}/task{task_type}_hand{hand_type}_{BASELINE_NAME}"
+    torch.save(model, baseline_path)
+    print(f"Baseline model saved to {baseline_path}")
 
 
 def get_video(env_id, hand_type, task_type, ga_index, pt_index):
 
+    env_folder = ENV_FOLDER_2D if env_id == ENV_2D else ENV_FOLDER_2_5D
+
+    # Get videos of speicific iterations of genetic algorithm or permutation testing
     iteration_path = None
+    iteration = None
     if ga_index is not None:
-        iteration_path = f"genetic_algorithm/{ga_index}"
+        iteration_path = GA_FOLDER
+        iteration = ga_index
     elif pt_index is not None:
-        iteration_path = f"permutation_testing/hand_type_{hand_type}_task_{task_type}/{pt_index}"
+        iteration_path = f"{PT_FOLDER}/task{task_type}/hand{hand_type}"
+        iteration = pt_index
     elif ga_index is not None and pt_index is not None:
         raise ValueError("Cannot specify both ga_index and pt_index.")
 
-
     # Load the model
     if iteration_path is not None:
-        model_path = f"{MODEL_FOLDER}/{iteration_path}/policy"
+        model_path = f"{MODEL_FOLDER}/{env_folder}/{iteration_path}/{MODEL_NAME}"
     else:
-        if task_type is None:
-            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_None/{CHECKPOINT_NAME}"
-        else:
-            model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
+        model_path = f"{MODEL_FOLDER}/{env_folder}/task{task_type}_hand{hand_type}"
 
-    better_exploration = env_id == TASK_2D
-    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type, ga_index=ga_index, pt_index=pt_index, better_exploration=better_exploration), n_envs=1, vec_env_cls=DummyVecEnv)
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, task_type, ga_index=ga_index, pt_index=pt_index, render=True, record=True), n_envs=1, vec_env_cls=DummyVecEnv)
 
     # Load model
     print(f"Loading model from {model_path}")
-    ppo_args = PPO_ARGS.copy()
-    task_count = env.get_attr("OBJECT_TYPES")[0] if env == TASK_2D else 1
-    ppo_args["policy_kwargs"]["task_count"] = task_count
-    model = DAPG.load(env=env, path=model_path, **ppo_args)
+    model = PPO.load(env=env, path=model_path, **PPO_ARGS.copy())
 
     # If using a genetic algorithm or permutation testing, load the specified hand params
     if iteration_path is not None:
-        raw_params = np.load(f"{MODEL_FOLDER}/{iteration_path}/hand_params.npy")
+        if pt_index is not None:
+            raw_params = np.load(f"{MODEL_FOLDER}/{env_folder}/{iteration_path}/{iteration}.npy")
+        else:
+            raw_params = np.load("morphologies/morphologies.npy")[0]
         hand_params = unnorm_hand_params(raw_params.copy())
         print(f"Norm. Params: {raw_params}")
         print("Hand Params: ", hand_params.segment_lengths, hand_params.joint_angle, hand_params.rotation_max)
@@ -764,8 +512,7 @@ def get_video(env_id, hand_type, task_type, ga_index, pt_index):
     # Render the environment
     gym.logger.min_level = logging.ERROR
     env = _make_env(env_id, hand_type, task_type, ga_index=ga_index, pt_index=pt_index, render=True, record=True)
-    obj_type = 0 if task_type is None else task_type
-    options = {"object_type": obj_type}
+    options = {"object_type": task_type}
     if iteration_path is not None:
         options["hand_parameters"] = hand_params
     obs, info = env.reset(options=options)
@@ -776,17 +523,10 @@ def get_video(env_id, hand_type, task_type, ga_index, pt_index):
             obs, reward, done, terminated, info = env.step(action)
             env.render()
             if done or terminated:
-                if episodes >= task_count:
-                    break
-                if task_type is not None:
-                    break
-                obj_type += 1
-                obs, info = env.reset(options={"object_type": obj_type})
-                episodes += 1
+                break
 
         # Ask the user if they want regenerate the video
         while True:
-            obj_type = 0 if task_type is None else task_type
             obs, info = env.reset(options=options)
             user_input = input("Do you want to generate a new video? (y/n): ").strip().lower()
             if user_input == 'y':
@@ -797,22 +537,28 @@ def get_video(env_id, hand_type, task_type, ga_index, pt_index):
 
 def get_photo(env_id, hand_type, task_type, ga_index, pt_index):
 
+    env_folder = ENV_FOLDER_2D if env_id == ENV_2D else ENV_FOLDER_2_5D
+
+    # Get videos of speicific iterations of genetic algorithm or permutation testing
     iteration_path = None
+    iteration = None
     if ga_index is not None:
-        iteration_path = f"genetic_algorithm/{ga_index}"
+        iteration_path = GA_FOLDER
+        iteration = ga_index
     elif pt_index is not None:
-        iteration_path = f"permutation_testing/hand_type_{hand_type}_task_{task_type}/{pt_index}"
+        iteration_path = f"{PT_FOLDER}/task{task_type}/hand{hand_type}"
+        iteration = pt_index
     elif ga_index is not None and pt_index is not None:
         raise ValueError("Cannot specify both ga_index and pt_index.")
 
-    env = make_vec_env(lambda: _make_env(env_id, hand_type, -1, ga_index=ga_index, pt_index=pt_index), n_envs=1, vec_env_cls=DummyVecEnv)
+    env = make_vec_env(lambda: _make_env(env_id, hand_type, -1, ga_index=ga_index, pt_index=pt_index, render=True), n_envs=1, vec_env_cls=DummyVecEnv)
 
     # If using a genetic algorithm or permutation testing, load the specified hand params
     if iteration_path is not None:
         if pt_index is not None:
-            raw_params = np.load(f"{MODEL_FOLDER}/{iteration_path}/hand_params.npy")
+            raw_params = np.load(f"{MODEL_FOLDER}/{env_folder}/{iteration_path}/{iteration}.npy")
         else:
-            raw_params = np.load("morphologies/morphologies.npy")[0]
+            raw_params = np.load(f"{GA_MORPHOLOGIES}/morphologies.npy")[0]
         hand_params = unnorm_hand_params(raw_params.copy())
         print(f"Norm. Params: {raw_params}")
         print("Hand Params: ", hand_params.segment_lengths, hand_params.joint_angle, hand_params.rotation_max)
@@ -820,7 +566,6 @@ def get_photo(env_id, hand_type, task_type, ga_index, pt_index):
     # Render the environment
     gym.logger.min_level = logging.ERROR
     env = _make_env(env_id, hand_type, None, ga_index=ga_index, pt_index=pt_index, render=True, better_exploration=False)
-    obj_type = 0
     options = {"object_type": -1, "photo_mode": True}
     if iteration_path is not None:
         options["hand_parameters"] = hand_params
@@ -834,7 +579,7 @@ def get_photo(env_id, hand_type, task_type, ga_index, pt_index):
         frame_img = env.render()
         frame += 1
         if done or terminated or frame >= PHOTO_FRAME:
-            photo_folder = f"{PHOTOS_FOLDER}/{iteration_path}" if iteration_path is not None else f"{PHOTOS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
+            photo_folder = f"{PHOTOS_FOLDER}/{env_folder}/{iteration_path}" if iteration_path is not None else f"{PHOTOS_FOLDER}/{env_folder}/task{task_type}/hand{hand_type}"
             os.makedirs(photo_folder, exist_ok=True)
             photo_path = os.path.join(photo_folder, f"photo.png")
             Image.fromarray(frame_img).save(photo_path)

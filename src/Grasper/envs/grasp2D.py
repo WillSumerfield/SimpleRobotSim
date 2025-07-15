@@ -8,12 +8,15 @@ import pymunk
 
 # Constants
 WINDOW_SIZE = np.array([256, 256])  # The size of the space
+XY_RATIO = WINDOW_SIZE[1]/WINDOW_SIZE[0]
 FLOOR_Y = 32
 FLOOR_COLOR = (64, 64, 64)
 PI2 = 2*np.pi
 HPI = np.pi/2
+SQ2 = np.sqrt(2)
 DOME_PRECISION = 12
 RANDOM_PRECISION = 12
+
 
 
 def get_rect_vertices(size, offset=(0, 0)):
@@ -61,16 +64,16 @@ class HandActions(Enum):
 class Hand():
 
     class Parameters():
-        def __init__(self, segment_lengths: np.ndarray, joint_angles: np.ndarray, rotation_max: float):
-            self.segment_lengths = segment_lengths # TopL, TopR, BottomL, BottomR
-            self.joint_angle = joint_angles # Left, Right
-            self.rotation_max = rotation_max
+        def __init__(self, params: np.ndarray):
+            self.segment_lengths = params[0:4] # TopL, TopR, BottomL, BottomR
+            self.joint_angle = params[4:6] # Left, Right
+            self.rotation_max = params[6]
 
-    DEFAULT_PARAMETERS = Parameters(
+    DEFAULT_PARAMETERS = Parameters(np.concatenate((
         np.array([48]*4), # Segment lengths
         np.array([np.pi/4]*2), # Joint angles
-        np.pi * (15/16.0) # Rotation Max
-    )
+        np.array([np.pi * (15/16.0)]) # Rotation Max
+    )))
 
     MOVE_SPEED = 3
     BASE_COLOR = (0, 0, 0)
@@ -92,10 +95,8 @@ class Hand():
         position = (WINDOW_SIZE[0]/2, self.MIN_Y_SPAWN) if centered else (rng.random()*WINDOW_SIZE[0], self.MIN_Y_SPAWN)#((np.array([WINDOW_SIZE[0], WINDOW_SIZE[1]-self.MIN_Y_SPAWN]) * rng.random(2, dtype=float)) \
                    #+ np.array([0, self.MIN_Y_SPAWN])).tolist()
         
-        if parameters is None:
-            parameters = self.DEFAULT_PARAMETERS
+        self.parameters = self.DEFAULT_PARAMETERS if parameters is None else self.Parameters(parameters)
         
-        self.parameters = parameters
         max_l_length = max(np.cos(self.parameters.joint_angle[0])*self.parameters.segment_lengths[0]+self.parameters.segment_lengths[2],
                            self.parameters.segment_lengths[0]+np.cos(self.parameters.joint_angle[0])*self.parameters.segment_lengths[2])
         max_r_length = max(np.cos(self.parameters.joint_angle[1])*self.parameters.segment_lengths[1]+self.parameters.segment_lengths[3],
@@ -180,9 +181,7 @@ class Hand():
 
     def get_state(self):
         return np.array([self._hinge.position[0]/WINDOW_SIZE[0], 
-                        self._hinge.position[1]/WINDOW_SIZE[1], 
-                        self._segment_ul_body.angle/PI2,
-                        self._segment_ur_body.angle/PI2])
+                        self._hinge.position[1]/WINDOW_SIZE[1]])
  
     def draw(self, canvas):
         pygame.draw.circle(canvas,
@@ -359,11 +358,9 @@ class Grasp2DEnv(gym.Env):
     TARGET_Y_MIN_BUFFER = 48
     MAX_TIME = 150
 
-    AGENT_SPACE = 4 # x, y, digit_angle1, digit_angle2
+    AGENT_SPACE = 2 # x, y
     OBJECT_SPACE = 3 # x, y, angle
-    TARGET_SPACE = 3 # x, y, angle
-    OBJECT_TYPES = len(Object.ObjectTypes)
-    OBS_SPACE = AGENT_SPACE + OBJECT_SPACE + TARGET_SPACE + OBJECT_TYPES
+    OBS_SPACE = AGENT_SPACE + OBJECT_SPACE
 
     MOVEMENT_SPACE = 5 # up, down, left, right, none
     ROTATION_SPACE = 3 # clockwise, counterclockwise, none
@@ -380,9 +377,6 @@ class Grasp2DEnv(gym.Env):
 
         # What the agent can do
         self.action_space = spaces.MultiDiscrete([self.MOVEMENT_SPACE, self.ROTATION_SPACE, self.OPEN_SPACE])
-
-        # The distribution of subtasks
-        self.subtask_distribution = [1/self.OBJECT_TYPES]*self.OBJECT_TYPES # Uniform distribution
 
         # Only needs to be set when changing the hand parameters
         self.hand_parameters = None
@@ -421,7 +415,10 @@ class Grasp2DEnv(gym.Env):
         self.clock = None
 
     def _get_obs(self):
-        return np.concat((self._object.get_type(), self._hand.get_state(), self._object.get_state(), self._obs_target_position), dtype=float)
+        hand_state = self._hand.get_state()
+        object_state = self._object.get_state()
+        object_state[:2] = object_state[:2] - hand_state[:2]  # Make the object position relative to the hand
+        return np.concatenate((hand_state, object_state), dtype=float)
     
     def _get_info(self):
         return {"task_type": self._object.get_type().argmax()}
@@ -436,9 +433,6 @@ class Grasp2DEnv(gym.Env):
         if hand_parameters is not None:
             self.hand_parameters = hand_parameters
         object_type = options.get("object_type", None)
-        self.subtask_distribution = options.get("subtask_distribution", self.subtask_distribution)
-        if object_type is None: # Use the distribution when object type is not provided.
-            object_type = np.random.choice(len(self.subtask_distribution), p=self.subtask_distribution)
         
         self._photo_mode = options.get("photo_mode", False)
             
@@ -477,18 +471,18 @@ class Grasp2DEnv(gym.Env):
         timeout = self._elapsed_steps >= self.MAX_TIME
         truncated = obj_outofbounds or timeout
 
-        # Check if goal is reached
-        goal_dist = np.linalg.norm(np.array([self._object._body.position]) - self._target_position[:2])
-        goal_angle_dist = 0 #np.abs(self._object._body.angle - self._target_position[2])
-        terminated = False# bool((goal_dist <= self.GOAL_RADIUS) and (goal_angle_dist <= self.GOAL_ROTATION))
-
-        reward = 100 if terminated else (-20 if obj_outofbounds else -1)
-        observation = self._get_obs()
+        obs = self._get_obs()
         info = self._get_info()
+
+        # Use more iterative rewards to enable better exploration
+        obj_pos = obs[self.AGENT_SPACE:self.AGENT_SPACE+2]
+        dist_to_obj = np.sqrt(obj_pos[0]**2 + (obj_pos[1]*XY_RATIO)**2) / SQ2
+        self._obj_off_ground = self._object._body.position[1] > (self._object.SIZE + FLOOR_Y)
+        reward = (1-dist_to_obj)**3 + self._obj_off_ground
 
         if self.render_mode == "human":
             self._render_frame()
-        return observation, reward, terminated, truncated, info
+        return obs, reward, False, truncated, info
 
     def render(self):
         if self.render_mode == "rgb_array":

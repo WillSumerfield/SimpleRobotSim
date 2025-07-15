@@ -16,27 +16,21 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 
+from src import *
+import src.Grasper
 from src.hand_morphologies import unnorm_hand_params
 from src.agent import CPU_COUNT, PPO_ARGS, DAPG
-import src.Grasper
 from src.Grasper.wrappers import BetterExploration, TaskType
 
 
 NUM_GENERATIONS = 20
-MORPHOLOGY_SAVE_PATH = "morphologies/"
-CHECKPOINTS_FOLDER = "checkpoints/genetic_algorithm"
-MODEL_FOLDER = f"models/genetic_algorithm"
-LOGS_FOLDER = "training_logs/genetic_algorithm"
-DIAGRAMS_FOLDER = "diagrams/genetic_algorithm"
-MODEL_NAME = "policy.zip"
+SUBFOLDER = "genetic_algorithm"
 HAND_PARAM_NAME = "hand_params.npy"
 
 
 def _make_env(env_id, task_type):
     env = gym.make(env_id)
-    env = BetterExploration(env)
-    if task_type is not None:
-        env = TaskType(env, task_type)
+    env = TaskType(env, task_type)
     env = gym.wrappers.FlattenObservation(env)
     env = Monitor(env)
     check_env(env)
@@ -109,10 +103,10 @@ class GeneticAlgorithm():
         
         # Setup the environment and policy network info
         self.task_type = task_type
+        self.save_folder = f""
         self.env = make_vec_env(lambda: _make_env(env_id, self.task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
 
-        self.tensorboard_log = f"{LOGS_FOLDER}/multitask" if self.task_type is None else f"{LOGS_FOLDER}/task_{self.task_type}"
-        self.task_count = self.env.get_attr("OBJECT_TYPES")[0]
+        self.tensorboard_log = f"{LOGS_FOLDER}/task_{self.task_type}"
         self.MODEL_ARGS = {**PPO_ARGS, "tensorboard_log": self.tensorboard_log}
         self.MODEL_ARGS["verbose"] = 0
         self.MODEL_ARGS["policy_kwargs"]["task_count"] = self.task_count
@@ -235,13 +229,13 @@ class GeneticAlgorithm():
         # Load last checkpoint
         if individual.initialized:
             args = self.MODEL_ARGS.copy()
-            args["path"] = f"{CHECKPOINTS_FOLDER}/{individual.index}/{MODEL_NAME}"
+            args["path"] = f"{CHECKPOINTS_FOLDER}/{self.env_folder}/{individual.index}.zip"
             model = DAPG.load(env=self.env, **args)
         else:
             # Load the parent's model
             if individual.parent_index is not None:
                 args = self.MODEL_ARGS.copy()
-                args["path"] = f"{CHECKPOINTS_FOLDER}/{individual.parent_index}/{MODEL_NAME}"
+                args["path"] = f"{CHECKPOINTS_FOLDER}/{self.env_folder}/{individual.parent_index}.zip"
                 model = DAPG.load(env=self.env, **args)
             # Create a new model
             else:
@@ -253,9 +247,8 @@ class GeneticAlgorithm():
         model.learn(total_timesteps=self.TIMESTEPS_PER_GENERATION)
 
         # Save model and hand parameters
-        if not os.path.exists(f"{CHECKPOINTS_FOLDER}/{individual.index}"):
-            os.makedirs(f"{CHECKPOINTS_FOLDER}/{individual.index}")
-        model.save(f"{CHECKPOINTS_FOLDER}/{individual.index}/{MODEL_NAME}")
+        os.makedirs(f"{CHECKPOINTS_FOLDER}/{self.env_folder}", exist_ok=True)
+        model.save(f"{CHECKPOINTS_FOLDER}/{self.env_folder}/{individual.index}.zip")
         np.save(f"{CHECKPOINTS_FOLDER}/{individual.index}/{HAND_PARAM_NAME}", individual.hand_morphology)
         
         # Evaluate model
@@ -333,10 +326,10 @@ def evolve_hands(env_id: str, task_type):
     print(f"Avg. Fitness: {avg:.2f}, Max: {mx:.2f}, Min: {mn:.2f}                                          ")
 
     # Save the top hands
-    save_path = MORPHOLOGY_SAVE_PATH + "morphologies.npy"
+    save_path = GA_MORPHOLOGIES + "morphologies.npy"
     indices = [individual.index for individual in genetic_algorithm._pop]
     final_morphologies = np.array([individual.hand_morphology for individual in genetic_algorithm._pop])
-    os.makedirs(MORPHOLOGY_SAVE_PATH, exist_ok=True)
+    os.makedirs(GA_MORPHOLOGIES, exist_ok=True)
     np.save(save_path, final_morphologies)
     os.makedirs(MODEL_FOLDER, exist_ok=True)
     for idx in indices:

@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import gymnasium as gym
-from gymnasium import utils, error, spaces
+from gymnasium import utils, spaces
 from gymnasium.envs.mujoco import MujocoEnv
 import mujoco as mj
 import glfw
@@ -82,7 +82,7 @@ class Grasp2_5DEnv(MujocoEnv, utils.EzPickle):
         truncated = self.truncated
         observation = self._get_obs(contacts)
 
-        obj_relative_pos = observation[[3, 5]]/3# The X,Z position of the object
+        obj_relative_pos = observation[[2, 3]]/3# The X,Z position of the object
         obj_dist = np.linalg.norm(obj_relative_pos)
         reward = (1-obj_dist)**3 + float(not contacts['floor'])*1
         self._total_reward += reward
@@ -120,10 +120,11 @@ class Grasp2_5DEnv(MujocoEnv, utils.EzPickle):
     def render(self):
         ret = super().render()
         if not self._render_init:
-            glfw.set_key_callback(self.mujoco_renderer.viewer.window, lambda *args, **kwargs: None) # Disable key callbacks
-            self.mujoco_renderer.viewer.cam.fixedcamid += 1
-            self.mujoco_renderer.viewer.cam.type = mj.mjtCamera.mjCAMERA_FIXED
-            self.mujoco_renderer.viewer._hide_menu = True
+            if self.render_mode == "human":
+                glfw.set_key_callback(self.mujoco_renderer.viewer.window, lambda *args, **kwargs: None) # Disable key callbacks
+                self.mujoco_renderer.viewer.cam.fixedcamid += 1
+                self.mujoco_renderer.viewer.cam.type = mj.mjtCamera.mjCAMERA_FIXED
+                self.mujoco_renderer.viewer._hide_menu = True
             self._render_init = True
         
         print(f"Reward: {self._total_reward:.2f}, Frames: {self._frames}        ", end="\r")

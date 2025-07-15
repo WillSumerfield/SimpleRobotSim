@@ -1,6 +1,7 @@
 import sys
 import os
 
+import pandas as pd
 import numpy as np
 import gymnasium as gym
 from stable_baselines3.common.evaluation import evaluate_policy
@@ -9,9 +10,10 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 
-from src.Grasper.wrappers import BetterExploration, TaskType
+from src import *
+from src.Grasper.wrappers import TaskType
 from src.hand_morphologies import HAND_TYPES, norm_hand_params, unnorm_hand_params
-from src.agent import MODEL_FOLDER, CHECKPOINT_NAME, CPU_COUNT, PPO_ARGS, DAPG
+from src.agent import CPU_COUNT, PPO_ARGS, DAPG
 np.set_printoptions(precision=2, suppress=True)
 
 
@@ -25,17 +27,10 @@ PARAM_SPAN = 0.5
 PERMUATION_COUNT = 4
 PERMUATION_SIZE = (PARAM_SPAN)/(PERMUATION_COUNT)
 
-LOGS_FOLDER = "training_logs/permuation_testing"
-MODEL_SUBFOLDER = "permutation_testing"
-MODEL_NAME = "policy.zip"
-PARAMS_NAME = "hand_params.npy"
-
 
 def _make_env(env_id, task_type):
     env = gym.make(env_id)
-    env = BetterExploration(env)
-    if task_type is not None:
-        env = TaskType(env, task_type)
+    env = TaskType(env, task_type)
     env = gym.wrappers.FlattenObservation(env)
     env = Monitor(env)
     check_env(env)
@@ -43,33 +38,32 @@ def _make_env(env_id, task_type):
 
 
 def perterbation_testing(env_id, hand_type, task_type, num_params=1):
-    # Make a log of the print outputs
-    log_dir = f"{MODEL_FOLDER}/{MODEL_SUBFOLDER}/hand_type_{hand_type}_task_{task_type}/"
-    os.makedirs(log_dir, exist_ok=True)
+
+    env_folder = ENV_FOLDER_2D if env_id == ENV_2D else ENV_FOLDER_2_5D
 
     # Redirect print statements to a log file
-    log_file_path = os.path.join(log_dir, "results.txt")
-    sys.stdout = open(log_file_path, "w")
+    results_path = f"{RESULTS_FOLDER}/{env_folder}"
+    os.makedirs(results_path, exist_ok=True)
+    log_file = open(f"{results_path}/{PT_RESULTS_FILE}", "w")
+    log_data = {"Iteration": [], "Performance": [], "Parameters": []}
 
-    print(f"Starting perterbation testing with hand type: {hand_type}, task type: {task_type}, num params: {num_params}")
+    log_file.write(f"Starting perterbation testing with hand type: {hand_type}, task type: {task_type}, num params: {num_params}")
     envs = make_vec_env(lambda: _make_env(env_id, task_type), n_envs=CPU_COUNT, vec_env_cls=SubprocVecEnv)
-    task_count = envs.get_attr("OBJECT_TYPES")[0]
     
     # Get the performance of the original hand
     original_params = HAND_TYPES[hand_type]
-    if task_type is None:
-        model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}/{CHECKPOINT_NAME}"
-    else:
-        model_path = f"{MODEL_FOLDER}/hand_type_{hand_type}_task_{task_type}/{CHECKPOINT_NAME}"
+    model_path = f"{MODEL_FOLDER}/{env_folder}/task{task_type}_hand{hand_type}.zip"
     ppo_args = PPO_ARGS.copy()
-    ppo_args["policy_kwargs"]["task_count"] = task_count
     original_model = DAPG.load(env=envs, path=model_path, **ppo_args)
     options = {"hand_parameters": original_params}
     envs.set_options(options)
     envs.reset()
     original_mean_reward, original_std_reward = evaluate_policy(original_model, envs, n_eval_episodes=EVAL_EPISODES, deterministic=True)
-    print(f"Original hand parameters: {norm_hand_params(original_params)}")
-    print(f"Original hand performance: {original_mean_reward:.2f} +/- {original_std_reward:.2f}")
+    log_file.write(f"Original hand parameters: {norm_hand_params(original_params)}")
+    log_file.write(f"Original hand performance: {original_mean_reward:.2f} +/- {original_std_reward:.2f}")
+    log_data["Iteration"] += [0],
+    log_data["Performance"] += [original_mean_reward]
+    log_data["Parameters"] += [norm_hand_params(original_params).tolist()[PARAM_INDEX]]
     del original_model
 
     # Randomly permute the hand parameters
@@ -83,17 +77,16 @@ def perterbation_testing(env_id, hand_type, task_type, num_params=1):
     # Train a controller for the permuted hand
     ppo_args = PPO_ARGS.copy()
     ppo_args["verbose"] = 0
-    ppo_args["tensorboard_log"] = f"{LOGS_FOLDER}/hand_type_{hand_type}_task_{task_type}"
-    ppo_args["policy_kwargs"]["task_count"] = task_count
+    ppo_args["tensorboard_log"] = f"{LOGS_FOLDER}/{env_folder}/task_{task_type}/hand_type{hand_type}"
     permuted_model = DAPG(env=envs, **ppo_args)
     permuted_model.learn(total_timesteps=TRAIN_TIMESTEPS, reset_num_timesteps=True)
-    permuted_model.save(f"{MODEL_FOLDER}/{MODEL_SUBFOLDER}/hand_type_{hand_type}_task_{task_type}/0/{MODEL_NAME}")
-    np.save(f"{MODEL_FOLDER}/{MODEL_SUBFOLDER}/hand_type_{hand_type}_task_{task_type}/0/{PARAMS_NAME}", permuted_params)
+    permuted_model.save(f"{MODEL_FOLDER}/{env_folder}/{PT_FOLDER}/task{task_type}/hand_type{hand_type}/{MODEL_NAME}_0.zip")
+    np.save(f"{MODEL_FOLDER}/{env_folder}/{PT_FOLDER}/hand_type{hand_type}task{task_type}/{HAND_PARAMS_FILE}_0.npy", permuted_params)
 
     # Test the permuted hand's performance
     mean_reward, std_reward = evaluate_policy(permuted_model, envs, n_eval_episodes=EVAL_EPISODES, deterministic=True)
-    print(f"Permuted hand parameters: {permuted_params}")
-    print(f"Permuted hand performance: {mean_reward:.2f} +/- {std_reward:.2f}")
+    log_file.write(f"Permuted hand parameters: {permuted_params}")
+    log_file.write(f"Permuted hand performance: {mean_reward:.2f} +/- {std_reward:.2f}")
 
     # Repeatedly permute the hand parameters and pick the best one
     max_reward = mean_reward
@@ -111,7 +104,7 @@ def perterbation_testing(env_id, hand_type, task_type, num_params=1):
             envs.reset()
 
             # Train a controller for the newly permuted hand
-            previous_model_path = f"{MODEL_FOLDER}/{MODEL_SUBFOLDER}/hand_type_{hand_type}_task_{task_type}/{permutation_idx-1}/{MODEL_NAME}"
+            previous_model_path = f"{MODEL_FOLDER}/{env_folder}/{PT_FOLDER}/task{task_type}/hand_type{hand_type}/{MODEL_NAME}_{permutation_idx-1}.zip"
             permuted_model = DAPG.load(env=envs, path=previous_model_path, **ppo_args)
             permuted_model.learn(total_timesteps=FINE_TUNE_TIMESTEPS, reset_num_timesteps=True)
 
@@ -127,16 +120,20 @@ def perterbation_testing(env_id, hand_type, task_type, num_params=1):
 
         # Use the best hand parameters for the next iteration
         permuted_params = best_params
-        best_model.save(f"{MODEL_FOLDER}/{MODEL_SUBFOLDER}/hand_type_{hand_type}_task_{task_type}/{permutation_idx}/{MODEL_NAME}")
-        np.save(f"{MODEL_FOLDER}/{MODEL_SUBFOLDER}/hand_type_{hand_type}_task_{task_type}/{permutation_idx}/{PARAMS_NAME}", permuted_params)
-        print(f"Iteration: {permutation_idx}, Performance: {max_reward:.2f}, Parameters {PARAM_INDEX} = {permuted_params[PARAM_INDEX]}")
+        best_model.save(f"{MODEL_FOLDER}/{env_folder}/{PT_FOLDER}/task{task_type}/hand_type{hand_type}/{MODEL_NAME}_{permutation_idx}.zip")
+        np.save(f"{MODEL_FOLDER}/{env_folder}/{PT_FOLDER}/task{task_type}/hand_type{hand_type}/{MODEL_NAME}_{permutation_idx}.npy", permuted_params)
+        log_file.write(f"Iteration: {permutation_idx}, Performance: {max_reward:.2f}, Parameters {PARAM_INDEX} = {permuted_params[PARAM_INDEX]}")
+        log_data["Iteration"] += [permutation_idx],
+        log_data["Performance"] += [max_reward]
+        log_data["Parameters"] += [norm_hand_params(best_params).tolist()[PARAM_INDEX]]
 
     # Compare the performance of the original hand and the permuted hand
-    print(f"Original Performance: {original_mean_reward}, Interatively Permuted Performance: {max_reward}")
+    log_file.write(f"Original Performance: {original_mean_reward}, Interatively Permuted Performance: {max_reward}")
 
     # Compare the parameters of the original hand and the permuted hand
-    print(f"Original parameters: {PARAM_INDEX} = {norm_hand_params(original_params)[PARAM_INDEX]}, Interatively Permuted parameters: {PARAM_INDEX} = {permuted_params[PARAM_INDEX]}")
+    log_file.write(f"Original parameters: {PARAM_INDEX} = {norm_hand_params(original_params)[PARAM_INDEX]}, Interatively Permuted parameters: {PARAM_INDEX} = {permuted_params[PARAM_INDEX]}")
+    df = pd.DataFrame(log_data, columns=["Iteration", "Performance"] + [f"Param_{i}" for i in PARAM_INDEX])
+    df.to_csv(f"{results_path}/{PT_CSV_FILE}", index=False)
 
-    sys.stdout.close()
-    sys.stdout = sys.__stdout__  # Reset stdout to default
-    print(f"Results saved to {log_file_path}")
+    print(f"Results saved to {results_path}/{PT_RESULTS_FILE} and {results_path}/{PT_CSV_FILE}")
+    log_file.close()

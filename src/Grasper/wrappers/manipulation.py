@@ -55,37 +55,9 @@ class BetterExploration(gym.Wrapper):
         self._closed_hand = hand_pos[2] > self._closed_angle and hand_pos[3] < -self._closed_angle
         self._obj_off_ground = self.env.unwrapped._object._body.position[1] > (self.env.unwrapped._object.SIZE + FLOOR_Y)
 
-        # # If the object has the target, reward the agent for moving the object to the target
-        # if self._near_target:
-        #     if self._obj_off_ground:
-        #         reward = 0.25#self.DISTANCE_SCALAR * (1-dist_to_target)**2
-        #     else:
-        #         reward = 0 if self._closed_hand else -0.1
-        # # If the hand is not near the object, reward the agent for moving the hand to the object
-        # else:
-        #     if action[2] == 1:
-        #         reward = -dist_to_obj
-        #     else:
-        #         reward = -1
-        # If it reaches the goal, act like it stayed at the perfect position the rest of the time
-        # if terminated:
-        #     reward = self.DISTANCE_SCALAR*(self.env.unwrapped.MAX_TIME - self.env.unwrapped._elapsed_steps)
-
         # Reward direct distance to the object and being off ground
         reward = (1-dist_to_obj)**3 + self._obj_off_ground*0.5
-
         self._total_reward += reward
-
-        # Track the subtask performance at the end of the episode
-        if terminated or truncated:
-            object_type = self.env.unwrapped._object._type
-            if self._subtask_counts[object_type] >= (100//self.env.unwrapped.OBJECT_TYPES):
-                last_reward = self._subtask_rewards[object_type].pop(0)
-                self._subtask_sums[object_type] -= last_reward
-            else: 
-                self._subtask_counts[object_type] += 1
-            self._subtask_rewards[object_type].append(self._total_reward)
-            self._subtask_sums[object_type] += self._total_reward
 
         if self.render_mode == "human":
             self._render_frame()
