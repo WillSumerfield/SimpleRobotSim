@@ -1,6 +1,6 @@
 <mujoco model="2d_claw_hand">
   <compiler angle="degree" coordinate="local" inertiafromgeom="true"/>
-  <option integrator="RK4" timestep="0.01"/>
+  <option integrator="RK4" timestep="0.0166"/>
 
   <custom>
     <numeric data="0.0 0.0 0.55 1.0 0.0 0.0 0.0 0.0 1.0 0.0 -1.0 0.0 -1.0 0.0 1.0" name="init_qpos"/>
@@ -8,7 +8,7 @@
 
   <default>
     <joint armature="1" damping="1" limited="true"/>
-    <geom conaffinity="3" condim="3" density="5.0" friction="0.5 1 0.5" margin="0.01" rgba="0.8 0.6 0.4 1"/>
+    <geom conaffinity="3" condim="3" density="5.0" friction="0.15 1 0.15" margin="0.01" rgba="0.8 0.6 0.4 1"/>
   </default>
 
   <asset>
@@ -23,43 +23,43 @@
     <!-- Ground -->
     <geom name="floor" conaffinity="1" condim="3" material="MatPlane" pos="0 0 0" rgba="0.8 0.9 0.8 1" size="10 1 0.1" type="plane"/>
 
+    <!-- Ball object -->
+    <body name="object" pos="0 0 0.4">
+      <joint type="free" pos="0 0 0"/>
+      <geom name="object" type="cylinder" size="0.3 0.1" euler="90 0 0" density="1" rgba="0.8 0.2 0.2 1"/>
+    </body>
+
     <!-- Claw base (fixed to world) -->
-    <body name="grasper" pos="0 0 2" gravcomp="1">
+    <body name="grasper" pos="0 0 2">
       <!-- Torso -->
       <geom name="torso_geom" pos="0 0 0" size="0.25" type="sphere"/>
       <joint name="slide_x" type="slide" axis="1 0 0" limited="false"/>
       <joint name="slide_y" type="slide" axis="0 0 1" limited="false"/>
 
       <!-- Left Finger -->
-      <body name="left_finger" pos="-0.15 0 -0.15" gravcomp="1">
+      <body name="left_finger" pos="-0.15 0 -0.15">
         <joint axis="0 1 0" name="left_finger_joint" pos="0.0 0.0 0.0" range="-15 60" type="hinge"/>
         <geom fromto="0.0 0.0 0.0 -0.2 0.0 -0.2" name="left_finger_upper_geom" size="0.08" type="capsule"/>
-        <body pos="-0.2 0.0 -0.2" gravcomp="1">
+        <body pos="-0.2 0.0 -0.2">
           <geom fromto="0.0 0.0 0.0 0.0 0.0 -0.4" name="left_finger_lower_geom" size="0.08" type="capsule"/>
         </body>
       </body>
 
       <!-- Right Finger -->
-      <body name="right_finger" pos="0.15 0 -0.15" gravcomp="1">
+      <body name="right_finger" pos="0.15 0 -0.15">
         <joint axis="0 -1 0" name="right_finger_joint" pos="0.0 0.0 0.0" range="-15 60" type="hinge"/>
         <geom fromto="0.0 0.0 0.0 0.2 0.0 -0.2" name="right_finger_upper_geom" size="0.08" type="capsule"/>
-        <body pos="0.2 0.0 -0.2" gravcomp="1">
+        <body pos="0.2 0.0 -0.2">
           <geom fromto="0.0 0.0 0.0 0.0 0.0 -0.4" name="right_finger_lower_geom" size="0.08" type="capsule"/>
         </body>
       </body>
-    </body>
-
-    <!-- Ball object -->
-    <body name="object" pos="0 0 0.4">
-      <joint type="free"/>
-      <geom name="object" type="cylinder" size="0.3 0.1" euler="90 0 0" density="10" rgba="0.8 0.2 0.2 1"/>
     </body>
 
   </worldbody>
 
   <actuator>
     <motor name="move_horizontal" joint="slide_x" ctrlrange="-1 1" ctrllimited="true" gear="2"/>
-    <motor name="move_vertical" joint="slide_y" ctrlrange="-1 1" ctrllimited="true" gear="10"/>
+    <motor name="move_vertical" joint="slide_y" ctrlrange="-1 1" ctrllimited="true" gear="4"/>
 
     <motor name="grab_left" joint="left_finger_joint" ctrlrange="-1 1" ctrllimited="true" gear="10"/>
     <motor name="grab_right" joint="right_finger_joint" ctrlrange="-1 1" ctrllimited="true" gear="10"/>
