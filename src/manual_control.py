@@ -52,13 +52,13 @@ def manual_control(env_name, hand_type, task_type, ga_index):
             actions = np.array([move, rotation, open_hand])
         elif env_name == ENV_2_5D:
             moves = np.zeros(2, dtype=np.float32)
-            if movement[1]:
-                moves[0] = -1.0
-            if movement[3]:
-                moves[0] = 1.0
             if movement[0]:
-                moves[1] = 1.0
+                moves[0] = -1.0
+            if movement[1]:
+                moves[0] = 1.0
             if movement[2]:
+                moves[1] = 1.0
+            if movement[3]:
                 moves[1] = -1.0
 
             if open_hand == 2:
