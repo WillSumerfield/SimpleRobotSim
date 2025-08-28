@@ -15,11 +15,12 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3 import PPO
 
 from src import *
 import src.Grasper
 from src.hand_morphologies import unnorm_hand_params
-from src.agent import CPU_COUNT, PPO_ARGS, DAPG
+from src.agent import CPU_COUNT, PPO_ARGS
 from src.Grasper.wrappers import BetterExploration, TaskType
 
 
@@ -90,7 +91,6 @@ class Individual():
 
 class GeneticAlgorithm():
 
-    CROSSOVER_PROB = 0.7
     MUTATION_PROB = 0.5
     MUTATION_STD = 0.5
     POP_SIZE = 5
@@ -99,7 +99,16 @@ class GeneticAlgorithm():
     EVALUATION_EPISODES = 100
 
 
-    def __init__(self, env_id: str, task_type: int = None):
+    def __init__(self, env_id: str, task_type: int = None, 
+                 mutation_rate: float = MUTATION_PROB, 
+                 population_size: int = POP_SIZE, 
+                 timesteps_per_generation: int = TIMESTEPS_PER_GENERATION
+        ):
+
+        self.mutation_prob = mutation_rate
+        self.population_size = population_size
+        self.timesteps_per_generation = timesteps_per_generation
+        self.env_folder = ENV_FOLDER_2D if env_id == ENV_2D else ENV_FOLDER_2_5D
         
         # Setup the environment and policy network info
         self.task_type = task_type
@@ -109,7 +118,6 @@ class GeneticAlgorithm():
         self.tensorboard_log = f"{LOGS_FOLDER}/task_{self.task_type}"
         self.MODEL_ARGS = {**PPO_ARGS, "tensorboard_log": self.tensorboard_log}
         self.MODEL_ARGS["verbose"] = 0
-        self.MODEL_ARGS["policy_kwargs"]["task_count"] = self.task_count
  
         # Define the fitness
         creator.create("FitnessMin", base.Fitness, weights=(1.0,))
@@ -133,7 +141,7 @@ class GeneticAlgorithm():
         # Create the initial population
         self.generation = 0
         self.evaluated_indices = set() # Only train individuals once per generation
-        self._pop = self.toolbox.population(n=self.POP_SIZE)
+        self._pop = self.toolbox.population(n=self.population_size)
         self.evaluate_population(self._pop)
 
         # Graph data
@@ -144,7 +152,7 @@ class GeneticAlgorithm():
             self.species_data[individual.index] = copy.deepcopy(self.data_dict)
             self.species_data[individual.index]["top fitnesss"] = individual.fitness.values[0]
             self.species_data[individual.index]["generation"] += [0]
-            self.species_data[individual.index]["proportion"] += [1/self.POP_SIZE]
+            self.species_data[individual.index]["proportion"] += [1/self.population_size]
             self.species_data[individual.index]["fitness"] += [individual.fitness.values[0]]
         self._update_graphs()
 
@@ -162,16 +170,9 @@ class GeneticAlgorithm():
         offspring = list(map(self.toolbox.clone, self._pop))
         random.shuffle(offspring)
 
-        # Crossover
-        # for child1, child2 in zip(offspring[::2], offspring[1::2]):
-        #     if self.toolbox.random() < self.CROSSOVER_PROB:
-        #         self.toolbox.crossover(child1, child2)
-        #         del child1.fitness.values
-        #         del child2.fitness.values
-
         # Mutation
         for mutant in offspring:
-            if np.random.rand() < self.MUTATION_PROB:
+            if np.random.rand() < self.mutation_prob:
                 mutant.parent_index = mutant.index
                 mutant.index = self.get_new_index()
                 mutant.initialized = False
@@ -190,14 +191,14 @@ class GeneticAlgorithm():
                 species_counts[individual.index] += 1
 
         # Replace the old population with the new one
-        self._pop[:] = self.toolbox.select(offspring + self._pop, self.POP_SIZE)
+        self._pop[:] = self.toolbox.select(offspring + self._pop, self.population_size)
 
         # Update the species data
         for species in species_counts:
             if species not in self.species_data:
                 self.species_data[species] = copy.deepcopy(self.data_dict)
             self.species_data[species]["generation"] += [self.generation]
-            self.species_data[species]["proportion"] += [species_counts[species]/self.POP_SIZE]
+            self.species_data[species]["proportion"] += [species_counts[species]/self.population_size]
             self.species_data[species]["fitness"] += [individual.fitness.values[0]]
             self.species_data[species]["parent"] = individual.parent_index
             self.species_data[species]["max fitness"] = max(self.species_data[individual.index]["fitness"])
@@ -230,27 +231,28 @@ class GeneticAlgorithm():
         if individual.initialized:
             args = self.MODEL_ARGS.copy()
             args["path"] = f"{CHECKPOINTS_FOLDER}/{self.env_folder}/{individual.index}.zip"
-            model = DAPG.load(env=self.env, **args)
+            model = PPO.load(env=self.env, **args)
         else:
             # Load the parent's model
             if individual.parent_index is not None:
                 args = self.MODEL_ARGS.copy()
                 args["path"] = f"{CHECKPOINTS_FOLDER}/{self.env_folder}/{individual.parent_index}.zip"
-                model = DAPG.load(env=self.env, **args)
+                model = PPO.load(env=self.env, **args)
             # Create a new model
             else:
                 args = self.MODEL_ARGS.copy()
-                model = DAPG(env=self.env, **args)
+                model = PPO(policy="MlpPolicy", env=self.env, **args)
             individual.initialized = True
 
         # Train model
-        model.learn(total_timesteps=self.TIMESTEPS_PER_GENERATION)
+        model.learn(total_timesteps=self.timesteps_per_generation)
 
         # Save model and hand parameters
         os.makedirs(f"{CHECKPOINTS_FOLDER}/{self.env_folder}", exist_ok=True)
         model.save(f"{CHECKPOINTS_FOLDER}/{self.env_folder}/{individual.index}.zip")
-        np.save(f"{CHECKPOINTS_FOLDER}/{individual.index}/{HAND_PARAM_NAME}", individual.hand_morphology)
-        
+        os.makedirs(f"{CHECKPOINTS_FOLDER}/{self.env_folder}/{individual.index}", exist_ok=True)
+        np.save(f"{CHECKPOINTS_FOLDER}/{self.env_folder}/{individual.index}/{HAND_PARAM_NAME}", individual.hand_morphology)
+
         # Evaluate model
         mean_reward, std_reward = evaluate_policy(model, self.env, n_eval_episodes=self.EVALUATION_EPISODES, deterministic=True)
 
