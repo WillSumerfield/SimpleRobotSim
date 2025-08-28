@@ -565,7 +565,7 @@ def get_photo(env_id, hand_type, task_type, ga_index, pt_index):
 
     # Render the environment
     gym.logger.min_level = logging.ERROR
-    env = _make_env(env_id, hand_type, None, ga_index=ga_index, pt_index=pt_index, render=True, better_exploration=False)
+    env = _make_env(env_id, hand_type, -1, ga_index=ga_index, pt_index=pt_index, render=True)
     options = {"object_type": -1, "photo_mode": True}
     if iteration_path is not None:
         options["hand_parameters"] = hand_params
@@ -584,6 +584,5 @@ def get_photo(env_id, hand_type, task_type, ga_index, pt_index):
             photo_path = os.path.join(photo_folder, f"photo.png")
             Image.fromarray(frame_img).save(photo_path)
             print(f"Photo saved to {photo_path}")
-            obj_type += 1
-            obs, info = env.reset(options={"object_type": obj_type})
+            obs, info = env.reset(options=options)
             break
