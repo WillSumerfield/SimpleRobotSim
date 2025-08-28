@@ -504,7 +504,6 @@ class Grasp2DEnv(gym.Env):
         self._floor.draw(canvas)
         self._object.draw(canvas)
         self._hand.draw(canvas)
-        #pygame.draw.circle(canvas, (0, 255, 0), self._target_position[:2], self.GOAL_RADIUS)
 
         inv_canvas = pygame.transform.flip(canvas, False, True) # Invert Y
         if self.render_mode == "human":
