@@ -113,8 +113,6 @@ class Grasp2_5DEnv(MujocoEnv, utils.EzPickle):
 
         self._total_reward += reward
 
-        print(f"{self._frames} {self._total_reward}", end="\r")
-
         if self.render_mode == "human":
             self.render()
         return observation, reward, bool(terminated), bool(truncated), {}
